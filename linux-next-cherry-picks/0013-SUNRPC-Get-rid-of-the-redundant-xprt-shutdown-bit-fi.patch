@@ -1,0 +1,49 @@
+From: Trond Myklebust <Trond.Myklebust@netapp.com>
+Subject: [PATCH] SUNRPC: Get rid of the redundant xprt->shutdown bit field
+
+It is only set after everyone has dereferenced the transport,
+and serves no useful purpose: setting it is racy, so all the
+socket code, etc still needs to be able to cope with the cases
+where they miss reading it.
+
+Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+---
+ net/sunrpc/xprtrdma/transport.c |   21 ++++++++-------------
+ 1 files changed, 8 insertions(+), 13 deletions(-)
+
+diff --git a/net/sunrpc/xprtrdma/transport.c b/net/sunrpc/xprtrdma/transport.c
+index xxxxxxx..xxxxxxx xxxxxx
+--- a/net/sunrpc/xprtrdma/transport.c
++++ b/net/sunrpc/xprtrdma/transport.c
+@@ -199,23 +199,18 @@ xprt_rdma_connect_worker(struct work_struct *work)
+ 	struct rpc_xprt *xprt = &r_xprt->xprt;
+ 	int rc = 0;
+ 
+-	if (!xprt->shutdown) {
+-		xprt_clear_connected(xprt);
+-
+-		dprintk("RPC:       %s: %sconnect\n", __func__,
+-				r_xprt->rx_ep.rep_connected != 0 ? "re" : "");
+-		rc = rpcrdma_ep_connect(&r_xprt->rx_ep, &r_xprt->rx_ia);
+-		if (rc)
+-			goto out;
+-	}
+-	goto out_clear;
++	current->flags |= PF_FSTRANS;
++	xprt_clear_connected(xprt);
+ 
+-out:
+-	xprt_wake_pending_tasks(xprt, rc);
++	dprintk("RPC:       %s: %sconnect\n", __func__,
++			r_xprt->rx_ep.rep_connected != 0 ? "re" : "");
++	rc = rpcrdma_ep_connect(&r_xprt->rx_ep, &r_xprt->rx_ia);
++	if (rc)
++		xprt_wake_pending_tasks(xprt, rc);
+ 
+-out_clear:
+ 	dprintk("RPC:       %s: exit\n", __func__);
+ 	xprt_clear_connecting(xprt);
++	current->flags &= ~PF_FSTRANS;
+ }
+ 
+ /*
