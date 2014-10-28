@@ -1,0 +1,137 @@
+From e90045185670bbdb315d50e5f89bf3f16249ee42 Mon Sep 17 00:00:00 2001
+From: Jubin John <jubin.john@intel.com>
+Date: Mon, 20 Oct 2014 23:53:59 -0700
+Subject: [PATCH] qib add RHEL7 support
+
+---
+ drivers/infiniband/hw/qib/qib_file_ops.c |    9 +++++++++
+ drivers/infiniband/hw/qib/qib_fs.c       |    5 +++++
+ drivers/infiniband/hw/qib/qib_init.c     |   23 +++++++++++++++++++++--
+ drivers/infiniband/hw/qib/qib_knx.c      |    1 +
+ 4 files changed, 36 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/infiniband/hw/qib/qib_file_ops.c b/drivers/infiniband/hw/qib/qib_file_ops.c
+index 376961d..ea5bdd5 100644
+--- a/drivers/infiniband/hw/qib/qib_file_ops.c
++++ b/drivers/infiniband/hw/qib/qib_file_ops.c
+@@ -39,11 +39,16 @@
+ #include <linux/vmalloc.h>
+ #include <linux/highmem.h>
+ #include <linux/io.h>
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 0)
+ #include <linux/aio.h>
++#else
++#include <linux/uio.h>
++#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 0) */
+ #include <linux/jiffies.h>
+ #include <asm/pgtable.h>
+ #include <linux/delay.h>
+ #include <linux/export.h>
++#include <linux/moduleparam.h>
+ 
+ #include "qib.h"
+ #include "qib_common.h"
+@@ -1163,7 +1168,11 @@ static int mmap_kvaddr(struct vm_area_struct *vma, u64 pgaddr,
+ 
+ 	vma->vm_pgoff = (unsigned long) addr >> PAGE_SHIFT;
+ 	vma->vm_ops = &qib_file_vm_ops;
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 7, 0)
+ 	vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
++#else
++	vma->vm_flags |= VM_RESERVED | VM_DONTEXPAND;
++#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(3, 7, 0) */
+ 	ret = 1;
+ 
+ bail:
+diff --git a/drivers/infiniband/hw/qib/qib_fs.c b/drivers/infiniband/hw/qib/qib_fs.c
+index f247fc6..cbe6e3c 100644
+--- a/drivers/infiniband/hw/qib/qib_fs.c
++++ b/drivers/infiniband/hw/qib/qib_fs.c
+@@ -61,8 +61,13 @@ static int qibfs_mknod(struct inode *dir, struct dentry *dentry,
+ 
+ 	inode->i_ino = get_next_ino();
+ 	inode->i_mode = mode;
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 7, 0)
+ 	inode->i_uid = GLOBAL_ROOT_UID;
+ 	inode->i_gid = GLOBAL_ROOT_GID;
++#else
++	inode->i_uid = 0;
++	inode->i_gid = 0;
++#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(3, 7, 0) */
+ 	inode->i_blocks = 0;
+ 	inode->i_atime = CURRENT_TIME;
+ 	inode->i_mtime = inode->i_atime;
+diff --git a/drivers/infiniband/hw/qib/qib_init.c b/drivers/infiniband/hw/qib/qib_init.c
+index 0e83ed4..995d301 100644
+--- a/drivers/infiniband/hw/qib/qib_init.c
++++ b/drivers/infiniband/hw/qib/qib_init.c
+@@ -1226,9 +1226,15 @@ void qib_disable_after_error(struct qib_devdata *dd)
+ 	if (dd->devstatusp)
+ 		*dd->devstatusp |= QIB_STATUS_HWERROR;
+ }
+-
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 8, 0)
+ static void qib_remove_one(struct pci_dev *);
+-static int qib_init_one(struct pci_dev *, const struct pci_device_id *);
++static int qib_init_one(struct pci_dev *,
++				  const struct pci_device_id *);
++#else
++static void __devexit qib_remove_one(struct pci_dev *);
++static int __devinit qib_init_one(struct pci_dev *,
++				  const struct pci_device_id *);
++#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(3, 8, 0) */
+ 
+ #define DRIVER_LOAD_MSG "Intel " QIB_DRV_NAME " loaded: "
+ #define PFX QIB_DRV_NAME ": "
+@@ -1245,7 +1251,11 @@ MODULE_DEVICE_TABLE(pci, qib_pci_tbl);
+ static struct pci_driver qib_driver = {
+ 	.name = QIB_DRV_NAME,
+ 	.probe = qib_init_one,
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 8, 0)
+ 	.remove = qib_remove_one,
++#else
++	.remove = __devexit_p(qib_remove_one),
++#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(3, 8, 0) */
+ 	.id_table = qib_pci_tbl,
+ 	.err_handler = &qib_pci_err_handler,
+ };
+@@ -1486,7 +1496,12 @@ static void qib_postinit_cleanup(struct qib_devdata *dd)
+ 	qib_free_devdata(dd);
+ }
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 8, 0)
+ static int qib_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
++#else
++static int __devinit qib_init_one(struct pci_dev *pdev,
++				  const struct pci_device_id *ent)
++#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(3, 8, 0) */
+ {
+ 	int ret, j, pidx, initfail;
+ 	struct qib_devdata *dd = NULL;
+@@ -1593,7 +1608,11 @@ bail:
+ 	return ret;
+ }
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 8, 0)
+ static void qib_remove_one(struct pci_dev *pdev)
++#else
++static void __devexit qib_remove_one(struct pci_dev *pdev)
++#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(3, 8, 0) */
+ {
+ 	struct qib_devdata *dd = pci_get_drvdata(pdev);
+ 	int ret;
+diff --git a/drivers/infiniband/hw/qib/qib_knx.c b/drivers/infiniband/hw/qib/qib_knx.c
+index f692913..efe79d6 100644
+--- a/drivers/infiniband/hw/qib/qib_knx.c
++++ b/drivers/infiniband/hw/qib/qib_knx.c
+@@ -29,6 +29,7 @@
+  * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  * SOFTWARE.
+  */
++#include <linux/module.h>
+ #include <linux/kthread.h>
+ #include <linux/kernel.h>
+ #include <linux/dma-mapping.h>
+-- 
+1.7.1
+
