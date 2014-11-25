@@ -1,0 +1,74 @@
+IB/qib: Fix debugfs ordering issue with multiple HCAs
+
+From: Mike Marciniszyn <mike.marciniszyn@intel.com>
+
+The debugfs init code was incorrectly called before the idr mechanism
+is used to get the unit number, so the dd->unit hasn't been
+initialized.  This caused the unit relative directory creation to fail
+after the first.
+
+This patch moves the init for the debugfs stuff until after all of the
+failures and after the unit number has been determined.
+
+A bug in unwind code in qib_alloc_devdata() is also fixed.
+
+Cc: <stable@vger.kernel.org>
+Reviewed-by: Dennis Dalessandro <dennis.dalessandro@intel.com>
+Signed-off-by: Mike Marciniszyn <mike.marciniszyn@intel.com>
+Signed-off-by: Roland Dreier <roland@purestorage.com>
+---
+ drivers/infiniband/hw/qib/qib_init.c |   25 +++++++++++--------------
+ 1 files changed, 11 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/infiniband/hw/qib/qib_init.c b/drivers/infiniband/hw/qib/qib_init.c
+index c1248a6..17e0831 100644
+--- a/drivers/infiniband/hw/qib/qib_init.c
++++ b/drivers/infiniband/hw/qib/qib_init.c
+@@ -1097,14 +1097,10 @@ struct qib_devdata *qib_alloc_devdata(struct pci_dev *pdev, size_t extra)
+ 	int ret;
+ 
+ 	dd = (struct qib_devdata *) ib_alloc_device(sizeof(*dd) + extra);
+-	if (!dd) {
+-		dd = ERR_PTR(-ENOMEM);
+-		goto bail;
+-	}
++	if (!dd)
++		return ERR_PTR(-ENOMEM);
+ 
+-#ifdef CONFIG_DEBUG_FS
+-	qib_dbg_ibdev_init(&dd->verbs_dev);
+-#endif
++	INIT_LIST_HEAD(&dd->list);
+ 
+ 	idr_preload(GFP_KERNEL);
+ 	spin_lock_irqsave(&qib_devs_lock, flags);
+@@ -1121,11 +1117,6 @@ struct qib_devdata *qib_alloc_devdata(struct pci_dev *pdev, size_t extra)
+ 	if (ret < 0) {
+ 		qib_early_err(&pdev->dev,
+ 			      "Could not allocate unit ID: error %d\n", -ret);
+-#ifdef CONFIG_DEBUG_FS
+-		qib_dbg_ibdev_exit(&dd->verbs_dev);
+-#endif
+-		ib_dealloc_device(&dd->verbs_dev.ibdev);
+-		dd = ERR_PTR(ret);
+ 		goto bail;
+ 	}
+ 
+@@ -1139,9 +1130,15 @@ struct qib_devdata *qib_alloc_devdata(struct pci_dev *pdev, size_t extra)
+ 			qib_early_err(&pdev->dev,
+ 				"Could not alloc cpulist info, cpu affinity might be wrong\n");
+ 	}
+-
+-bail:
++#ifdef CONFIG_DEBUG_FS
++	qib_dbg_ibdev_init(&dd->verbs_dev);
++#endif
+ 	return dd;
++bail:
++	if (!list_empty(&dd->list))
++		list_del_init(&dd->list);
++	ib_dealloc_device(&dd->verbs_dev.ibdev);
++	return ERR_PTR(ret);
+ }
+ 
+ /*

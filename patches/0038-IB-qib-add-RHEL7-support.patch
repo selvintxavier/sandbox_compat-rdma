@@ -1,17 +1,17 @@
-From e90045185670bbdb315d50e5f89bf3f16249ee42 Mon Sep 17 00:00:00 2001
-From: Jubin John <jubin.john@intel.com>
-Date: Mon, 20 Oct 2014 23:53:59 -0700
-Subject: [PATCH] qib add RHEL7 support
+IB/qib: add RHEL7 support
 
+From: Jubin John <jubin.john@intel.com>
+
+Reviewed-by: Mike Marciniszyn <mike.marciniszyn@intel.com>
+Signed-off-by: Jubin John <jubin.john@intel.com>
 ---
  drivers/infiniband/hw/qib/qib_file_ops.c |    9 +++++++++
  drivers/infiniband/hw/qib/qib_fs.c       |    5 +++++
  drivers/infiniband/hw/qib/qib_init.c     |   23 +++++++++++++++++++++--
- drivers/infiniband/hw/qib/qib_knx.c      |    1 +
- 4 files changed, 36 insertions(+), 2 deletions(-)
+ 3 files changed, 35 insertions(+), 2 deletions(-)
 
 diff --git a/drivers/infiniband/hw/qib/qib_file_ops.c b/drivers/infiniband/hw/qib/qib_file_ops.c
-index 376961d..ea5bdd5 100644
+index 275f247..2037630 100644
 --- a/drivers/infiniband/hw/qib/qib_file_ops.c
 +++ b/drivers/infiniband/hw/qib/qib_file_ops.c
 @@ -39,11 +39,16 @@
@@ -31,7 +31,7 @@ index 376961d..ea5bdd5 100644
  
  #include "qib.h"
  #include "qib_common.h"
-@@ -1163,7 +1168,11 @@ static int mmap_kvaddr(struct vm_area_struct *vma, u64 pgaddr,
+@@ -971,7 +976,11 @@ static int mmap_kvaddr(struct vm_area_struct *vma, u64 pgaddr,
  
  	vma->vm_pgoff = (unsigned long) addr >> PAGE_SHIFT;
  	vma->vm_ops = &qib_file_vm_ops;
@@ -62,10 +62,10 @@ index f247fc6..cbe6e3c 100644
  	inode->i_atime = CURRENT_TIME;
  	inode->i_mtime = inode->i_atime;
 diff --git a/drivers/infiniband/hw/qib/qib_init.c b/drivers/infiniband/hw/qib/qib_init.c
-index 0e83ed4..995d301 100644
+index 24e802f..c1248a6 100644
 --- a/drivers/infiniband/hw/qib/qib_init.c
 +++ b/drivers/infiniband/hw/qib/qib_init.c
-@@ -1226,9 +1226,15 @@ void qib_disable_after_error(struct qib_devdata *dd)
+@@ -1177,9 +1177,15 @@ void qib_disable_after_error(struct qib_devdata *dd)
  	if (dd->devstatusp)
  		*dd->devstatusp |= QIB_STATUS_HWERROR;
  }
@@ -83,7 +83,7 @@ index 0e83ed4..995d301 100644
  
  #define DRIVER_LOAD_MSG "Intel " QIB_DRV_NAME " loaded: "
  #define PFX QIB_DRV_NAME ": "
-@@ -1245,7 +1251,11 @@ MODULE_DEVICE_TABLE(pci, qib_pci_tbl);
+@@ -1196,7 +1202,11 @@ MODULE_DEVICE_TABLE(pci, qib_pci_tbl);
  static struct pci_driver qib_driver = {
  	.name = QIB_DRV_NAME,
  	.probe = qib_init_one,
@@ -95,7 +95,7 @@ index 0e83ed4..995d301 100644
  	.id_table = qib_pci_tbl,
  	.err_handler = &qib_pci_err_handler,
  };
-@@ -1486,7 +1496,12 @@ static void qib_postinit_cleanup(struct qib_devdata *dd)
+@@ -1417,7 +1427,12 @@ static void qib_postinit_cleanup(struct qib_devdata *dd)
  	qib_free_devdata(dd);
  }
  
@@ -108,7 +108,7 @@ index 0e83ed4..995d301 100644
  {
  	int ret, j, pidx, initfail;
  	struct qib_devdata *dd = NULL;
-@@ -1593,7 +1608,11 @@ bail:
+@@ -1522,7 +1537,11 @@ bail:
  	return ret;
  }
  
@@ -120,18 +120,3 @@ index 0e83ed4..995d301 100644
  {
  	struct qib_devdata *dd = pci_get_drvdata(pdev);
  	int ret;
-diff --git a/drivers/infiniband/hw/qib/qib_knx.c b/drivers/infiniband/hw/qib/qib_knx.c
-index f692913..efe79d6 100644
---- a/drivers/infiniband/hw/qib/qib_knx.c
-+++ b/drivers/infiniband/hw/qib/qib_knx.c
-@@ -29,6 +29,7 @@
-  * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-  * SOFTWARE.
-  */
-+#include <linux/module.h>
- #include <linux/kthread.h>
- #include <linux/kernel.h>
- #include <linux/dma-mapping.h>
--- 
-1.7.1
-

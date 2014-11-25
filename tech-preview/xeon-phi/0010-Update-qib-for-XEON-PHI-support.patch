@@ -1,23 +1,24 @@
-From 0ed3bd45f3b358e5f32ff4e6e87b94fd80da69b5 Mon Sep 17 00:00:00 2001
-From: Phil Cayton <phil.cayton@intel.com>
-Date: Thu, 6 Feb 2014 13:45:33 -0800
-Subject: [PATCH 10/12] Update qib for XEON PHI support
+IB/qib: Update qib for XEON PHI support
 
+From: Jubin John <jubin.john@intel.com>
+
+Reviewed-by: Mike Marciniszyn <mike.marciniszyn@intel.com>
+Signed-off-by: Jubin John <jubin.john@intel.com>
 ---
- drivers/infiniband/hw/qib/Makefile         |   5 +
- drivers/infiniband/hw/qib/qib.h            |  41 +-
- drivers/infiniband/hw/qib/qib_common.h     |   8 +-
- drivers/infiniband/hw/qib/qib_file_ops.c   | 369 +++++++++++-
- drivers/infiniband/hw/qib/qib_init.c       |  61 +-
- drivers/infiniband/hw/qib/qib_knx.c        | 923 +++++++++++++++++++++++++++++
- drivers/infiniband/hw/qib/qib_knx.h        |  63 ++
- drivers/infiniband/hw/qib/qib_knx_sdma.h   | 105 ++++
- drivers/infiniband/hw/qib/qib_knx_tidrcv.h |  48 ++
- 9 files changed, 1596 insertions(+), 27 deletions(-)
+ drivers/infiniband/hw/qib/Makefile         |    5 
+ drivers/infiniband/hw/qib/qib.h            |   19 
+ drivers/infiniband/hw/qib/qib_common.h     |    7 
+ drivers/infiniband/hw/qib/qib_file_ops.c   |  334 +++++-
+ drivers/infiniband/hw/qib/qib_init.c       |   16 
+ drivers/infiniband/hw/qib/qib_knx.c        | 1532 ++++++++++++++++++++++++++++
+ drivers/infiniband/hw/qib/qib_knx.h        |   74 +
+ drivers/infiniband/hw/qib/qib_knx_common.h |  126 ++
+ drivers/infiniband/hw/qib/qib_user_sdma.c  |  173 +--
+ drivers/infiniband/hw/qib/qib_user_sdma.h  |  106 ++
+ 10 files changed, 2241 insertions(+), 151 deletions(-)
  create mode 100644 drivers/infiniband/hw/qib/qib_knx.c
  create mode 100644 drivers/infiniband/hw/qib/qib_knx.h
- create mode 100644 drivers/infiniband/hw/qib/qib_knx_sdma.h
- create mode 100644 drivers/infiniband/hw/qib/qib_knx_tidrcv.h
+ create mode 100644 drivers/infiniband/hw/qib/qib_knx_common.h
 
 diff --git a/drivers/infiniband/hw/qib/Makefile b/drivers/infiniband/hw/qib/Makefile
 index 57f8103..ba2a49d 100644
@@ -33,61 +34,33 @@ index 57f8103..ba2a49d 100644
 +ccflags-y += -DQIB_CONFIG_KNX
 +endif
 diff --git a/drivers/infiniband/hw/qib/qib.h b/drivers/infiniband/hw/qib/qib.h
-index 1946101..ad87abd 100644
+index 1946101..85c078e 100644
 --- a/drivers/infiniband/hw/qib/qib.h
 +++ b/drivers/infiniband/hw/qib/qib.h
-@@ -112,7 +112,20 @@ struct qib_eep_log_mask {
- };
- 
- /*
-- * Below contains all data related to a single context (formerly called port).
-+ * Indicates to the driver that the loadable parameter could be
-+ * configured by it as it was not configured by the user.
-+ */
-+#define QIB_DRIVER_AUTO_CONFIGURATION 10
-+
-+#if defined(CONFIG_X86_64) && defined(CONFIG_NUMA)
-+#define qib_configure_numa(a) \
-+	(a.x86_vendor == X86_VENDOR_INTEL && a.x86 == 6 && a.x86_model == 45)
-+#else
-+#define qib_configure_numa(a) 0
+@@ -234,6 +234,10 @@ struct qib_ctxtdata {
+ 	u32 lookaside_qpn;
+ 	/* QPs waiting for context processing */
+ 	struct list_head qp_wait_list;
++#ifdef QIB_CONFIG_KNX
++	/* KNX Receive Context Data */
++	struct qib_knx_ctxt *krcd;
 +#endif
-+
-+/*
-+  * Below contains all data related to a single context (formerly called port).
-  */
- 
  #ifdef CONFIG_DEBUG_FS
-@@ -739,6 +752,12 @@ struct qib_devdata {
- 
- 	/* mem-mapped pointer to base of chip regs */
- 	u64 __iomem *kregbase;
-+
-+	/* mem-mapped base of chip regs plus offset of the SendBufAvail0
-+	 * register
-+	 */
-+	u64 sendbufavail0;
-+
- 	/* end of mem-mapped chip space excluding sendbuf and user regs */
- 	u64 __iomem *kregend;
- 	/* physical address of chip for io_remap, etc. */
-@@ -1103,7 +1122,15 @@ struct qib_devdata {
- 	/* per device cq worker */
+ 	/* verbs stats per CTX */
+ 	struct qib_opcode_stats_perctx *opstats;
+@@ -1104,6 +1108,11 @@ struct qib_devdata {
  	struct kthread_worker *worker;
  
-+	int local_node_id; /* NUMA node closest to HCA */
  	int assigned_node_id; /* NUMA node closest to HCA */
 +
 +#ifdef QIB_CONFIG_KNX
-+	/* peer node id of connected KNX node */
-+	u16 node_id;
-+	struct qib_knx *knx;
++	/* number of KNx nodes using this device */
++	u16 num_knx;
 +#endif
-+
  };
  
  /* hol_state values */
-@@ -1132,6 +1159,9 @@ struct qib_filedata {
+@@ -1132,6 +1141,9 @@ struct qib_filedata {
  	unsigned tidcursor;
  	struct qib_user_sdma_queue *pq;
  	int rec_cpu_num; /* for cpu affinity; -1 if none */
@@ -97,7 +70,7 @@ index 1946101..ad87abd 100644
  };
  
  extern struct list_head qib_dev_list;
-@@ -1209,6 +1239,13 @@ int qib_set_uevent_bits(struct qib_pportdata *, const int);
+@@ -1209,6 +1221,13 @@ int qib_set_uevent_bits(struct qib_pportdata *, const int);
  	(((struct qib_filedata *)(fp)->private_data)->tidcursor)
  #define user_sdma_queue_fp(fp) \
  	(((struct qib_filedata *)(fp)->private_data)->pq)
@@ -111,17 +84,8 @@ index 1946101..ad87abd 100644
  
  static inline struct qib_devdata *dd_from_ppd(struct qib_pportdata *ppd)
  {
-@@ -1476,6 +1513,8 @@ extern unsigned qib_n_krcv_queues;
- extern unsigned qib_sdma_fetch_arb;
- extern unsigned qib_compat_ddr_negotiate;
- extern int qib_special_trigger;
-+extern unsigned qib_pio_avail_bits;
-+extern unsigned qib_rcvhdrpoll;
- extern unsigned qib_numa_aware;
- 
- extern struct mutex qib_mutex;
 diff --git a/drivers/infiniband/hw/qib/qib_common.h b/drivers/infiniband/hw/qib/qib_common.h
-index 5670ace..9182d02 100644
+index 5670ace..39eef25 100644
 --- a/drivers/infiniband/hw/qib/qib_common.h
 +++ b/drivers/infiniband/hw/qib/qib_common.h
 @@ -1,4 +1,5 @@
@@ -144,62 +108,29 @@ index 5670ace..9182d02 100644
  
  	/* size of struct base_info to write to */
  	__u32 spu_base_info_size;
-@@ -360,7 +365,6 @@ struct qib_user_info {
- 	 * address of struct base_info to write to
- 	 */
- 	__u64 spu_base_info;
--
- } __attribute__ ((aligned(8)));
- 
- /* User commands. */
 diff --git a/drivers/infiniband/hw/qib/qib_file_ops.c b/drivers/infiniband/hw/qib/qib_file_ops.c
-index 275f247..6eebad0 100644
+index c062c60..93ca1f9 100644
 --- a/drivers/infiniband/hw/qib/qib_file_ops.c
 +++ b/drivers/infiniband/hw/qib/qib_file_ops.c
-@@ -48,6 +48,42 @@
+@@ -53,6 +53,7 @@
  #include "qib.h"
  #include "qib_common.h"
  #include "qib_user_sdma.h"
-+#ifdef QIB_CONFIG_KNX
 +#include "qib_knx.h"
-+#endif
-+
-+/*
-+ * Option for a user application to read from the SendBufAvailn registers
-+ * for the send buffer status as a memory IO operation or from main memory.
-+ * The default mode of operation is to have the user process read this
-+ * register from mapped memory when running on the local socket and have
-+ * it read from the register directly (memory IO) when running on the far
-+ * socket. For older applications, ie.., with QIB_USER_SWMINOR less than
-+ * 12, all processes will read the register from main memory.
-+ */
-+unsigned qib_pio_avail_bits = 1;
-+module_param_named(pio_avail_bits, qib_pio_avail_bits, uint, S_IRUGO);
-+MODULE_PARM_DESC(pio_avail_bits, "send buffer status read: "
-+	"0=memory read on local NUMA node & MMIO read on far nodes, "
-+	"1=memory read(default), 2=MMIO read, "
-+	"10=option 1 for AMD & <= Intel Westmere cpus and option 0 for newer cpus");
-+
-+/*
-+ * Option for a user application to read from the RcvHdrTailn registers
-+ * for the next empty receive header queue entry as a memory IO operation
-+ * or from main memory. The default mode of operation is to have the user
-+ * process read this register from mapped memory when running on the local
-+ * socket and have it read from the register directly (memory IO) when
-+ * running on the far socket. For older applications, ie.., with
-+ * QIB_USER_SWMINOR less than 12, all user processes will read the
-+ * register from main memory.
-+ */
-+unsigned qib_rcvhdrpoll = 1;
-+module_param_named(rcvhdrpoll, qib_rcvhdrpoll, uint, S_IRUGO);
-+MODULE_PARM_DESC(rcvhdrpoll, "receive buffer status read: "
-+	"0=memory read on local NUMA node & MMIO read on far nodes, "
-+	"1=memory read(default), 2=MMIO read, "
-+	"10=option 1 for AMD & <= Intel Westmere cpus and option 0 for newer cpus");
  
  #undef pr_fmt
  #define pr_fmt(fmt) QIB_DRV_NAME ": " fmt
-@@ -89,6 +125,73 @@ static u64 cvt_kvaddr(void *p)
+@@ -64,6 +65,9 @@ static ssize_t qib_aio_write(struct kiocb *, const struct iovec *,
+ 			     unsigned long, loff_t);
+ static unsigned int qib_poll(struct file *, struct poll_table_struct *);
+ static int qib_mmapf(struct file *, struct vm_area_struct *);
++static int subctxt_search_ctxts(struct qib_devdata *, struct file *,
++				const struct qib_user_info *);
++
+ 
+ static const struct file_operations qib_file_ops = {
+ 	.owner = THIS_MODULE,
+@@ -94,6 +98,64 @@ static u64 cvt_kvaddr(void *p)
  	return paddr;
  }
  
@@ -235,15 +166,6 @@ index 275f247..6eebad0 100644
 +	if (ret < 0)
 +		goto bail_free;
 +
-+	switch (qib_rcvhdrpoll) {
-+	case 0:
-+		if (local_node)
-+			break;
-+	case 2:
-+		kinfo->spi_runtime_flags &= ~QIB_RUNTIME_NODMA_RTAIL;
-+		break;
-+	}
-+
 +	if (rcd->subctxt_cnt && !subctxt_fp(fp))
 +		kinfo->spi_runtime_flags |= QIB_RUNTIME_MASTER;
 +
@@ -273,19 +195,10 @@ index 275f247..6eebad0 100644
  static int qib_get_base_info(struct file *fp, void __user *ubase,
  			     size_t ubase_size)
  {
-@@ -100,6 +203,7 @@ static int qib_get_base_info(struct file *fp, void __user *ubase,
- 	unsigned subctxt_cnt;
- 	int shared, master;
- 	size_t sz;
-+	int local_node = (numa_node_id() == pcibus_to_node(dd->pcidev->bus));
- 
- 	subctxt_cnt = rcd->subctxt_cnt;
- 	if (!subctxt_cnt) {
-@@ -176,15 +280,91 @@ static int qib_get_base_info(struct file *fp, void __user *ubase,
- 	 * both can be enabled and used.
+@@ -182,14 +244,43 @@ static int qib_get_base_info(struct file *fp, void __user *ubase,
  	 */
  	kinfo->spi_rcvhdr_base = (u64) rcd->rcvhdrq_phys;
--	kinfo->spi_rcvhdr_tailaddr = (u64) rcd->rcvhdrqtailaddr_phys;
+ 	kinfo->spi_rcvhdr_tailaddr = (u64) rcd->rcvhdrqtailaddr_phys;
 +	/*
 +	 * In the case of KNX, qib_do_user_init() would call into the
 +	 * KNX-specific memory allocation/registration functions. These
@@ -300,64 +213,16 @@ index 275f247..6eebad0 100644
 +	if (knx_node_fp(fp))
 +		kinfo->spi_runtime_flags =
 +			qib_knx_ctxt_info(rcd, QIB_KNX_CTXTINFO_FLAGS, fp);
-+	else {
-+		switch (qib_rcvhdrpoll) {
-+		case 0:
-+			if (local_node)
-+				kinfo->spi_rcvhdr_tailaddr =
-+					(u64) rcd->rcvhdrqtailaddr_phys;
-+			else {
-+				kinfo->spi_rcvhdr_tailaddr =
-+					(u64) (kinfo->spi_uregbase +
-+					       ur_rcvhdrtail);
-+				kinfo->spi_runtime_flags &=
-+					~QIB_RUNTIME_NODMA_RTAIL;
-+			}
-+			break;
-+		case 1:
-+			kinfo->spi_rcvhdr_tailaddr =
-+				(u64) rcd->rcvhdrqtailaddr_phys;
-+			break;
-+		case 2:
-+			kinfo->spi_rcvhdr_tailaddr =
-+				(u64) (kinfo->spi_uregbase + ur_rcvhdrtail);
-+			kinfo->spi_runtime_flags &= ~QIB_RUNTIME_NODMA_RTAIL;
-+			break;
-+		default:
-+			ret = -EINVAL;
-+			break;
-+		}
-+	}
-+
  	kinfo->spi_rhf_offset = dd->rhf_offset;
  	kinfo->spi_rcv_egrbufs = (u64) rcd->rcvegr_phys;
 -	kinfo->spi_pioavailaddr = (u64) dd->pioavailregs_phys;
 +
 +	/* see comment for spi_uregbase above */
-+	if (knx_node_fp(fp)) {
++	if (knx_node_fp(fp))
 +		kinfo->spi_pioavailaddr =
 +			qib_knx_ctxt_info(rcd, QIB_KNX_CTXTINFO_PIOAVAIL, fp);
-+	} else {
-+		switch (qib_pio_avail_bits) {
-+		case 0:
-+			kinfo->spi_pioavailaddr = local_node ?
-+				(u64)dd->pioavailregs_phys :
-+			(u64)dd->sendbufavail0;
-+			break;
-+		case 1:
-+			kinfo->spi_pioavailaddr = (u64)dd->pioavailregs_phys;
-+			break;
-+		case 2:
-+			kinfo->spi_pioavailaddr = (u64)dd->sendbufavail0;
-+			break;
-+		default:
-+			ret = -EINVAL;
-+			break;
-+		}
-+	}
-+
-+	if (ret < 0)
-+		goto bail;
++	else
++		kinfo->spi_pioavailaddr = (u64) dd->pioavailregs_phys;
 +
  	/* setup per-unit (not port) status area for user programs */
 -	kinfo->spi_status = (u64) kinfo->spi_pioavailaddr +
@@ -379,7 +244,7 @@ index 275f247..6eebad0 100644
  	if (!shared) {
  		kinfo->spi_piocnt = rcd->piocnt;
  		kinfo->spi_piobufbase = (u64) rcd->piobufs;
-@@ -204,7 +384,11 @@ static int qib_get_base_info(struct file *fp, void __user *ubase,
+@@ -209,7 +300,11 @@ static int qib_get_base_info(struct file *fp, void __user *ubase,
  			dd->palign * kinfo->spi_piocnt * slave;
  	}
  
@@ -392,7 +257,7 @@ index 275f247..6eebad0 100644
  		kinfo->spi_sendbuf_status =
  			cvt_kvaddr(&rcd->user_event_mask[subctxt_fp(fp)]);
  		/* only spi_subctxt_* fields should be set in this block! */
-@@ -225,6 +409,11 @@ static int qib_get_base_info(struct file *fp, void __user *ubase,
+@@ -230,6 +325,11 @@ static int qib_get_base_info(struct file *fp, void __user *ubase,
  	kinfo->spi_pioindex = (kinfo->spi_piobufbase - dd->pio2k_bufbase) /
  		dd->palign;
  	kinfo->spi_pioalign = dd->palign;
@@ -404,65 +269,7 @@ index 275f247..6eebad0 100644
  	kinfo->spi_qpair = QIB_KD_QP;
  	/*
  	 * user mode PIO buffers are always 2KB, even when 4KB can
-@@ -978,6 +1167,35 @@ bail:
- 	return ret;
- }
- 
-+static int mmap_sendbufavail(struct vm_area_struct *vma, struct qib_devdata *dd,
-+		     u64 ureg)
-+{
-+	unsigned long phys;
-+	unsigned long sz;
-+	int ret;
-+
-+	/*
-+	 * This is real hardware, so use io_remap.  This is the mechanism
-+	 * for the user process to update the head registers for their ctxt
-+	 * in the chip.
-+	 */
-+	sz = PAGE_SIZE;
-+	if ((vma->vm_end - vma->vm_start) > sz)
-+		ret = -EFAULT;
-+	else {
-+		phys = dd->physaddr + ureg;
-+		vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
-+
-+		vma->vm_flags &= ~VM_MAYWRITE;
-+		vma->vm_flags |= VM_DONTCOPY | VM_DONTEXPAND | VM_READ;
-+
-+		ret = io_remap_pfn_range(vma, vma->vm_start,
-+					 phys >> PAGE_SHIFT,
-+					 vma->vm_end - vma->vm_start,
-+					 vma->vm_page_prot);
-+	}
-+	return ret;
-+}
- /**
-  * qib_mmapf - mmap various structures into user space
-  * @fp: the file pointer
-@@ -1056,6 +1274,8 @@ static int qib_mmapf(struct file *fp, struct vm_area_struct *vma)
- 
- 	if (pgaddr == ureg)
- 		ret = mmap_ureg(vma, dd, ureg);
-+	else if (pgaddr == dd->sendbufavail0)
-+		ret = mmap_sendbufavail(vma, dd, pgaddr - (u64)dd->kregbase);
- 	else if (pgaddr == piobufs)
- 		ret = mmap_piobufs(vma, dd, rcd, piobufs, piocnt);
- 	else if (pgaddr == dd->pioavailregs_phys)
-@@ -1187,11 +1407,7 @@ static void assign_ctxt_affinity(struct file *fp, struct qib_devdata *dd)
- 		int cpu;
- 		cpu = find_first_zero_bit(qib_cpulist,
- 					  qib_cpulist_count);
--		if (cpu == qib_cpulist_count)
--			qib_dev_err(dd,
--			"no cpus avail for affinity PID %u\n",
--			current->pid);
--		else {
-+		if (cpu != qib_cpulist_count) {
- 			__set_bit(cpu, qib_cpulist);
- 			fd->rec_cpu_num = cpu;
- 		}
-@@ -1261,6 +1477,17 @@ static int init_subctxts(struct qib_devdata *dd,
+@@ -1270,6 +1370,17 @@ static int init_subctxts(struct qib_devdata *dd,
  		goto bail;
  	}
  
@@ -480,7 +287,7 @@ index 275f247..6eebad0 100644
  	rcd->subctxt_uregbase = vmalloc_user(PAGE_SIZE * num_subctxts);
  	if (!rcd->subctxt_uregbase) {
  		ret = -ENOMEM;
-@@ -1283,6 +1510,9 @@ static int init_subctxts(struct qib_devdata *dd,
+@@ -1292,6 +1403,9 @@ static int init_subctxts(struct qib_devdata *dd,
  		goto bail_rhdr;
  	}
  
@@ -490,36 +297,131 @@ index 275f247..6eebad0 100644
  	rcd->subctxt_cnt = uinfo->spu_subctxt_cnt;
  	rcd->subctxt_id = uinfo->spu_subctxt_id;
  	rcd->active_slaves = 1;
-@@ -1333,6 +1563,7 @@ static int setup_ctxt(struct qib_pportdata *ppd, int ctxt,
+@@ -1326,6 +1440,14 @@ static int setup_ctxt(struct qib_pportdata *ppd, int ctxt,
+ 
+ 	rcd = qib_create_ctxtdata(ppd, ctxt, numa_id);
+ 
++#ifdef QIB_CONFIG_KNX
++	if (uinfo->spu_knx_node_id)
++		/*
++		 * Skip allocation of page pointer list for TID
++		 * receives. This will be done on the KNX.
++		 */
++		goto no_page_list;
++#endif
+ 	/*
+ 	 * Allocate memory for use in qib_tid_update() at open to
+ 	 * reduce cost of expected send setup per message segment
+@@ -1341,7 +1463,11 @@ static int setup_ctxt(struct qib_pportdata *ppd, int ctxt,
+ 		ret = -ENOMEM;
  		goto bailerr;
  	}
++#ifdef QIB_CONFIG_KNX
++no_page_list:
++#endif
  	rcd->userversion = uinfo->spu_userversion;
 +
  	ret = init_subctxts(dd, rcd, uinfo);
  	if (ret)
  		goto bailerr;
-@@ -1496,7 +1727,16 @@ static int find_shared_ctxt(struct file *fp,
+@@ -1498,43 +1624,68 @@ done:
+ static int find_shared_ctxt(struct file *fp,
+ 			    const struct qib_user_info *uinfo)
+ {
+-	int devmax, ndev, i;
++	int devmax, ndev;
+ 	int ret = 0;
++	struct qib_devdata *dd;
+ 
++#ifdef QIB_CONFIG_KNX
++	/*
++	 * In the case we are allocating a context for a KNX process,
++	 * Don't loop over all devices but use the one assosiated with the
++	 * requesting KNX.
++	 */
++	if (uinfo->spu_knx_node_id) {
++		dd = qib_knx_node_to_dd(uinfo->spu_knx_node_id);
++		if (dd && dd->num_knx)
++			ret = subctxt_search_ctxts(dd, fp, uinfo);
++		goto done;
++	}
++#endif
+ 	devmax = qib_count_units(NULL, NULL);
  
  	for (ndev = 0; ndev < devmax; ndev++) {
- 		struct qib_devdata *dd = qib_lookup(ndev);
+-		struct qib_devdata *dd = qib_lookup(ndev);
 -
-+#ifdef QIB_CONFIG_KNX
-+		/*
-+		 * In the case we are allocating a context for a KNX process,
-+		 * reject any device that is not associated with the
-+		 * requesting KNX.
-+		 */
-+		if ((uinfo->spu_knx_node_id &&
-+		     dd->node_id != uinfo->spu_knx_node_id))
-+			continue;
-+#endif
++		dd = qib_lookup(ndev);
  		/* device portion of usable() */
  		if (!(dd && (dd->flags & QIB_PRESENT) && dd->kregbase))
  			continue;
-@@ -1617,6 +1857,14 @@ static int qib_assign_ctxt(struct file *fp, const struct qib_user_info *uinfo)
+-		for (i = dd->first_user_ctxt; i < dd->cfgctxts; i++) {
+-			struct qib_ctxtdata *rcd = dd->rcd[i];
++		ret = subctxt_search_ctxts(dd, fp, uinfo);
++		if (ret)
++			break;
++	}
++#ifdef QIB_CONFIG_KNX
++done:
++#endif
++	return ret;
++}
+ 
+-			/* Skip ctxts which are not yet open */
+-			if (!rcd || !rcd->cnt)
+-				continue;
+-			/* Skip ctxt if it doesn't match the requested one */
+-			if (rcd->subctxt_id != uinfo->spu_subctxt_id)
+-				continue;
+-			/* Verify the sharing process matches the master */
+-			if (rcd->subctxt_cnt != uinfo->spu_subctxt_cnt ||
+-			    rcd->userversion != uinfo->spu_userversion ||
+-			    rcd->cnt >= rcd->subctxt_cnt) {
+-				ret = -EINVAL;
+-				goto done;
+-			}
+-			ctxt_fp(fp) = rcd;
+-			subctxt_fp(fp) = rcd->cnt++;
+-			rcd->subpid[subctxt_fp(fp)] = current->pid;
+-			tidcursor_fp(fp) = 0;
+-			rcd->active_slaves |= 1 << subctxt_fp(fp);
+-			ret = 1;
++static int subctxt_search_ctxts(struct qib_devdata *dd, struct file *fp,
++				const struct qib_user_info *uinfo)
++{
++	int ret = 0, i;
++	for (i = dd->first_user_ctxt; i < dd->cfgctxts; i++) {
++		struct qib_ctxtdata *rcd = dd->rcd[i];
++
++		/* Skip ctxts which are not yet open */
++		if (!rcd || !rcd->cnt)
++			continue;
++		/* Skip ctxt if it doesn't match the requested one */
++		if (rcd->subctxt_id != uinfo->spu_subctxt_id)
++			continue;
++		/* Verify the sharing process matches the master */
++		if (rcd->subctxt_cnt != uinfo->spu_subctxt_cnt ||
++		    rcd->userversion != uinfo->spu_userversion ||
++		    rcd->cnt >= rcd->subctxt_cnt) {
++			ret = -EINVAL;
+ 			goto done;
+ 		}
++		ctxt_fp(fp) = rcd;
++		subctxt_fp(fp) = rcd->cnt++;
++		rcd->subpid[subctxt_fp(fp)] = current->pid;
++		tidcursor_fp(fp) = 0;
++		rcd->active_slaves |= 1 << subctxt_fp(fp);
++		ret = 1;
++		break;
+ 	}
+-
+ done:
+ 	return ret;
+ }
+@@ -1626,6 +1777,13 @@ static int qib_assign_ctxt(struct file *fp, const struct qib_user_info *uinfo)
+ 
  	if (swminor >= 11 && uinfo->spu_port_alg < QIB_PORT_ALG_COUNT)
  		alg = uinfo->spu_port_alg;
- 
 +#ifdef QIB_CONFIG_KNX
 +	/* Make sure we have a connection to the KNX module on the right node */
 +	if (uinfo->spu_knx_node_id && !qib_knx_get(uinfo->spu_knx_node_id)) {
@@ -527,38 +429,73 @@ index 275f247..6eebad0 100644
 +		goto done;
 +	}
 +#endif
-+
+ 
  	mutex_lock(&qib_mutex);
  
- 	if (qib_compatible_subctxts(swmajor, swminor) &&
-@@ -1638,6 +1886,24 @@ static int qib_assign_ctxt(struct file *fp, const struct qib_user_info *uinfo)
+@@ -1633,13 +1791,38 @@ static int qib_assign_ctxt(struct file *fp, const struct qib_user_info *uinfo)
+ 	    uinfo->spu_subctxt_cnt) {
+ 		ret = find_shared_ctxt(fp, uinfo);
+ 		if (ret > 0) {
+-			ret = do_qib_user_sdma_queue_create(fp);
++#ifdef QIB_CONFIG_KNX
++			if (uinfo->spu_knx_node_id) {
++				ret = qib_knx_sdma_queue_create(fp);
++			} else
++#endif
++				ret = do_qib_user_sdma_queue_create(fp);
+ 			if (!ret)
+ 				assign_ctxt_affinity(fp, (ctxt_fp(fp))->dd);
+ 			goto done_ok;
+ 		}
+ 	}
+ 
++#ifdef QIB_CONFIG_KNX
++	/*
++	 * If there is a KNX node set, we pick the device that is
++	 * associate with that KNX node
++	 */
++	if (uinfo->spu_knx_node_id) {
++		struct qib_devdata *dd =
++			qib_knx_node_to_dd(uinfo->spu_knx_node_id);
++		if (dd) {
++			ret = find_free_ctxt(dd->unit, fp, uinfo);
++			if (!ret)
++				ret = qib_knx_alloc_ctxt(
++					uinfo->spu_knx_node_id,
++					ctxt_fp(fp)->ctxt);
++		} else
++			ret = -ENXIO;
++		goto done_chk_sdma;
++	}
++
++#endif
+ 	i_minor = iminor(file_inode(fp)) - QIB_USER_MINOR_BASE;
+ 	if (i_minor)
+ 		ret = find_free_ctxt(i_minor - 1, fp, uinfo);
+@@ -1648,7 +1831,6 @@ static int qib_assign_ctxt(struct file *fp, const struct qib_user_info *uinfo)
  		const unsigned int cpu = cpumask_first(&current->cpus_allowed);
  		const unsigned int weight =
  			cpumask_weight(&current->cpus_allowed);
-+#ifdef QIB_CONFIG_KNX
-+		/*
-+		 * If there is a KNX node set, we pick the device that is on
-+		 * the same NUMA node as the KNX.
-+		 */
-+		if (uinfo->spu_knx_node_id) {
-+			struct qib_devdata *dd =
-+				qib_knx_node_to_dd(uinfo->spu_knx_node_id);
-+			if (dd) {
-+				ret = find_free_ctxt(dd->unit, fp, uinfo);
-+				if (!ret)
-+					ret = qib_knx_alloc_ctxt(dd,
-+							ctxt_fp(fp)->ctxt);
-+			} else
-+				ret = -ENXIO;
-+			goto done_chk_sdma;
-+		}
-+#endif
- 
+-
  		if (weight == 1 && !test_bit(cpu, qib_cpulist))
  			if (!find_hca(cpu, &unit) && unit >= 0)
-@@ -1652,6 +1918,9 @@ done_chk_sdma:
- 	if (!ret)
+ 				if (!find_free_ctxt(unit, fp, uinfo)) {
+@@ -1659,9 +1841,21 @@ static int qib_assign_ctxt(struct file *fp, const struct qib_user_info *uinfo)
+ 	}
+ 
+ done_chk_sdma:
+-	if (!ret)
++	if (!ret) {
++#ifdef QIB_CONFIG_KNX
++		if (uinfo->spu_knx_node_id) {
++			ret = qib_knx_sdma_queue_create(fp);
++			/*if (!ret)
++			  ret = qib_knx_setup_tidrcv(fp);*/
++			goto done_ok;
++		}
++#endif
  		ret = do_qib_user_sdma_queue_create(fp);
++	}
  done_ok:
 +#ifdef QIB_CONFIG_KNX
 +	knx_node_fp(fp) = uinfo->spu_knx_node_id;
@@ -566,7 +503,7 @@ index 275f247..6eebad0 100644
  	mutex_unlock(&qib_mutex);
  
  done:
-@@ -1666,11 +1935,25 @@ static int qib_do_user_init(struct file *fp,
+@@ -1676,11 +1870,25 @@ static int qib_do_user_init(struct file *fp,
  	struct qib_ctxtdata *rcd = ctxt_fp(fp);
  	struct qib_devdata *dd;
  	unsigned uctxt;
@@ -592,7 +529,7 @@ index 275f247..6eebad0 100644
  		goto bail;
  	}
  
-@@ -1721,6 +2004,41 @@ static int qib_do_user_init(struct file *fp,
+@@ -1731,6 +1939,41 @@ static int qib_do_user_init(struct file *fp,
  	 */
  	dd->f_sendctrl(dd->pport, QIB_SENDCTRL_AVAIL_BLIP);
  
@@ -634,23 +571,31 @@ index 275f247..6eebad0 100644
  	/*
  	 * Now allocate the rcvhdr Q and eager TIDs; skip the TID
  	 * array for time being.  If rcd->ctxt > chip-supported,
-@@ -1730,6 +2048,7 @@ static int qib_do_user_init(struct file *fp,
+@@ -1740,6 +1983,9 @@ static int qib_do_user_init(struct file *fp,
  	ret = qib_create_rcvhdrq(dd, rcd);
  	if (!ret)
  		ret = qib_setup_eagerbufs(rcd);
++#ifdef QIB_CONFIG_KNX
 +cont_init:
++#endif
  	if (ret)
  		goto bail_pio;
  
-@@ -1752,7 +2071,6 @@ static int qib_do_user_init(struct file *fp,
- 	 */
- 	if (rcd->rcvhdrtail_kvaddr)
- 		qib_clear_rcvhdrtail(rcd);
--
- 	dd->f_rcvctrl(rcd->ppd, QIB_RCVCTRL_CTXT_ENB | QIB_RCVCTRL_TIDFLOW_ENB,
- 		      rcd->ctxt);
+@@ -1837,6 +2083,13 @@ static int qib_close(struct inode *in, struct file *fp)
  
-@@ -1884,6 +2202,12 @@ static int qib_close(struct inode *in, struct file *fp)
+ 	/* drain user sdma queue */
+ 	if (fd->pq) {
++#ifdef QIB_CONFIG_KNX
++		/*
++		 * The thread should be stopped first before attempting
++		 * to clean the queue.
++		 */
++		qib_knx_sdma_queue_destroy(fd);
++#endif
+ 		qib_user_sdma_queue_drain(rcd->ppd, fd->pq);
+ 		qib_user_sdma_queue_destroy(fd->pq);
+ 	}
+@@ -1894,6 +2147,12 @@ static int qib_close(struct inode *in, struct file *fp)
  	}
  
  	mutex_unlock(&qib_mutex);
@@ -663,7 +608,7 @@ index 275f247..6eebad0 100644
  	qib_free_ctxtdata(dd, rcd); /* after releasing the mutex */
  
  bail:
-@@ -2169,15 +2493,22 @@ static ssize_t qib_write(struct file *fp, const char __user *data,
+@@ -2179,6 +2438,13 @@ static ssize_t qib_write(struct file *fp, const char __user *data,
  		ret = qib_assign_ctxt(fp, &cmd.cmd.user_info);
  		if (ret)
  			goto bail;
@@ -677,22 +622,8 @@ index 275f247..6eebad0 100644
  		break;
  
  	case QIB_CMD_USER_INIT:
- 		ret = qib_do_user_init(fp, &cmd.cmd.user_info);
--		if (ret)
--			goto bail;
--		ret = qib_get_base_info(fp, (void __user *) (unsigned long)
--					cmd.cmd.user_info.spu_base_info,
--					cmd.cmd.user_info.spu_base_info_size);
-+		if (!ret)
-+			ret = qib_get_base_info(
-+				fp, (void __user *) (unsigned long)
-+				cmd.cmd.user_info.spu_base_info,
-+				cmd.cmd.user_info.spu_base_info_size);
- 		break;
- 
- 	case QIB_CMD_RECV_CTRL:
 diff --git a/drivers/infiniband/hw/qib/qib_init.c b/drivers/infiniband/hw/qib/qib_init.c
-index 24e802f..84b3222 100644
+index 17e0831..f8992f7 100644
 --- a/drivers/infiniband/hw/qib/qib_init.c
 +++ b/drivers/infiniband/hw/qib/qib_init.c
 @@ -51,6 +51,10 @@
@@ -706,72 +637,7 @@ index 24e802f..84b3222 100644
  #undef pr_fmt
  #define pr_fmt(fmt) QIB_DRV_NAME ": " fmt
  
-@@ -64,6 +68,14 @@
- #define QLOGIC_IB_R_EMULATOR_MASK (1ULL<<62)
- 
- /*
-+ * Select the NUMA node id on which to allocate the receive header
-+ * queue, eager buffers and send pioavail register.
-+ */
-+int qib_numa_node;
-+module_param_named(numa_node, qib_numa_node, int, S_IRUGO);
-+MODULE_PARM_DESC(numa_node, "NUMA node on which memory is allocated");
-+
-+/*
-  * Number of ctxts we are configured to use (to allow for more pio
-  * buffers per ctxt, etc.)  Zero means use chip value.
-  */
-@@ -71,11 +83,6 @@ ushort qib_cfgctxts;
- module_param_named(cfgctxts, qib_cfgctxts, ushort, S_IRUGO);
- MODULE_PARM_DESC(cfgctxts, "Set max number of contexts to use");
- 
--unsigned qib_numa_aware;
--module_param_named(numa_aware, qib_numa_aware, uint, S_IRUGO);
--MODULE_PARM_DESC(numa_aware,
--	"0 -> PSM allocation close to HCA, 1 -> PSM allocation local to process");
--
- /*
-  * If set, do not write to any regs if avoidable, hack to allow
-  * check for deranged default register values.
-@@ -84,6 +91,12 @@ ushort qib_mini_init;
- module_param_named(mini_init, qib_mini_init, ushort, S_IRUGO);
- MODULE_PARM_DESC(mini_init, "If set, do minimal diag init");
- 
-+unsigned qib_numa_aware = QIB_DRIVER_AUTO_CONFIGURATION;
-+module_param_named(numa_aware, qib_numa_aware, uint, S_IRUGO);
-+MODULE_PARM_DESC(numa_aware, "Use NUMA aware allocations: "
-+	"0=disabled, 1=enabled, "
-+	"10=option 0 for AMD & <= Intel Westmere cpus and option 1 for newer cpus(default)");
-+
- unsigned qib_n_krcv_queues;
- module_param_named(krcvqs, qib_n_krcv_queues, uint, S_IRUGO);
- MODULE_PARM_DESC(krcvqs, "number of kernel receive queues per IB port");
-@@ -1095,6 +1108,24 @@ struct qib_devdata *qib_alloc_devdata(struct pci_dev *pdev, size_t extra)
- 	unsigned long flags;
- 	struct qib_devdata *dd;
- 	int ret;
-+	int node_id;
-+	int local_node_id = pcibus_to_node(dd->pcidev->bus);
-+	s64 new_node_id = qib_numa_node;
-+
-+	if (local_node_id < 0)
-+		local_node_id = numa_node_id();
-+
-+	if (new_node_id < 0)
-+		new_node_id = local_node_id;
-+
-+	new_node_id = node_online(new_node_id) ? new_node_id :
-+		local_node_id;
-+
-+	dd->local_node_id = local_node_id;
-+	dd->assigned_node_id = new_node_id;
-+
-+	node_id = qib_numa_aware ? dd->local_node_id :
-+		dd->assigned_node_id;
- 
- 	dd = (struct qib_devdata *) ib_alloc_device(sizeof(*dd) + extra);
- 	if (!dd) {
-@@ -1263,6 +1294,13 @@ static int __init qlogic_ib_init(void)
+@@ -1270,6 +1274,12 @@ static int __init qlogic_ib_init(void)
  	/* not fatal if it doesn't work */
  	if (qib_init_qibfs())
  		pr_err("Unable to register ipathfs\n");
@@ -779,47 +645,39 @@ index 24e802f..84b3222 100644
 +#ifdef QIB_CONFIG_KNX
 +	ret = qib_knx_server_init();
 +	if (ret < 0)
-+		pr_err("Unable to start KNX listen thread\n");
++		pr_err(": Unable to start KNX listen thread\n");
 +#endif
-+
  	goto bail; /* all OK */
  
  bail_dev:
-@@ -1287,6 +1325,10 @@ static void __exit qlogic_ib_cleanup(void)
+@@ -1294,6 +1304,9 @@ static void __exit qlogic_ib_cleanup(void)
  {
  	int ret;
  
 +#ifdef QIB_CONFIG_KNX
 +	qib_knx_server_exit();
 +#endif
-+
  	ret = qib_exit_qibfs();
  	if (ret)
  		pr_err(
-@@ -1754,6 +1796,15 @@ int init_chip_wc_pat(struct qib_devdata *dd, u32 vl15buflen)
- 	iounmap(dd->kregbase);
- 	dd->kregbase = NULL;
+@@ -1546,6 +1559,9 @@ static void __devexit qib_remove_one(struct pci_dev *pdev)
+ 	/* unregister from IB core */
+ 	qib_unregister_ib_device(dd);
  
-+	if (qib_numa_aware == QIB_DRIVER_AUTO_CONFIGURATION)
-+		qib_numa_aware = qib_configure_numa(boot_cpu_data) ? 1 : 0;
-+
-+	if (qib_rcvhdrpoll == QIB_DRIVER_AUTO_CONFIGURATION)
-+		qib_rcvhdrpoll = qib_configure_numa(boot_cpu_data) ? 0 : 1;
-+
-+	if (qib_pio_avail_bits == QIB_DRIVER_AUTO_CONFIGURATION)
-+		qib_pio_avail_bits = qib_configure_numa(boot_cpu_data) ? 0 : 1;
-+
++#ifdef QIB_CONFIG_KNX
++	qib_knx_remove_device(dd);
++#endif
  	/*
- 	 * Assumes chip address space looks like:
- 	 *	- kregs + sregs + cregs + uregs (in any order)
+ 	 * Disable the IB link, disable interrupts on the device,
+ 	 * clear dma engines, etc.
 diff --git a/drivers/infiniband/hw/qib/qib_knx.c b/drivers/infiniband/hw/qib/qib_knx.c
 new file mode 100644
-index 0000000..c15276f
+index 0000000..5a9bdaa
 --- /dev/null
 +++ b/drivers/infiniband/hw/qib/qib_knx.c
-@@ -0,0 +1,923 @@
+@@ -0,0 +1,1532 @@
 +/*
-+ * Copyright (c) 2012 Intel Corporation. All rights reserved.
++ * Copyright (c) 2012, 2013 Intel Corporation. All rights reserved.
 + *
 + * This software is available to you under a choice of one of two
 + * licenses.  You may choose to be licensed under the terms of the GNU
@@ -849,6 +707,7 @@ index 0000000..c15276f
 + * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 + * SOFTWARE.
 + */
++#include <linux/module.h>
 +#include <linux/kthread.h>
 +#include <linux/kernel.h>
 +#include <linux/dma-mapping.h>
@@ -857,12 +716,21 @@ index 0000000..c15276f
 +
 +#include "qib.h"
 +#include "qib_knx.h"
++#include "qib_user_sdma.h"
++#include "qib_knx_common.h"
 +
 +unsigned int qib_knx_nconns = 5;
 +module_param_named(num_conns, qib_knx_nconns, uint, S_IRUGO);
 +MODULE_PARM_DESC(num_conns, "Max number of pending connections");
 +
 +#define QIB_KNX_SCIF_PORT SCIF_OFED_PORT_9
++#define CLIENT_THREAD_NAME(x) "qib/mic" __stringify(x)
++
++#define knx_sdma_next(sdma) \
++	(sdma->head = ((sdma->head + 1) % sdma->desc_num))
++#define per_ctxt(ctxt, sub) ((ctxt * QLOGIC_IB_MAX_SUBCTXT) + sub)
++#define QIB_KNX_SDMA_STATUS(sdma, st) \
++	QIB_KNX_SDMA_SET(sdma->mflags->status, ((u64)st << 32) | 1)
 +
 +struct qib_knx_server {
 +	struct task_struct *kthread;
@@ -902,7 +770,16 @@ index 0000000..c15276f
 +	struct scif_range *pages;
 +};
 +
++struct qib_knx_tidrcv {
++	struct qib_knx_rma tidmem;
++	u64 tidbase;
++	u32 tidcnt;
++};
++
 +struct qib_knx_ctxt {
++	u16 ctxt;
++	struct qib_knx *knx;
++	struct qib_pportdata *ppd;
 +	/* local registered memory for PIO buffers */
 +	struct qib_knx_rma piobufs[QLOGIC_IB_MAX_SUBCTXT];
 +	/* local registered memory for user registers */
@@ -924,6 +801,23 @@ index 0000000..c15276f
 +	__u64 status;
 +	__u64 piobufbase[QLOGIC_IB_MAX_SUBCTXT];
 +	__u32 runtime_flags;
++
++	struct qib_user_sdma_queue *pq[QLOGIC_IB_MAX_SUBCTXT];
++};
++
++struct qib_knx_sdma {
++	/* KNX flags page */
++	struct scif_range *mflag_pages;
++	struct qib_knx_sdma_mflags *mflags;
++	/* KNX descriptor queue */
++	struct scif_range *queue_pages;
++	struct qib_knx_sdma_desc *queue;
++	u32 desc_num;
++	/* host flags (in host memory) */
++	struct qib_knx_rma hflags_mem;
++	struct qib_knx_sdma_hflags *hflags;
++	u32 head;                           /* shadow */
++	u32 complete;
 +};
 +
 +struct qib_knx {
@@ -934,9 +828,15 @@ index 0000000..c15276f
 +	int numa_node;
 +	struct qib_devdata *dd;
 +	struct qib_knx_ctxt **ctxts;
++	spinlock_t ctxt_lock;
++	resource_size_t bar;
++	u64 barlen;
++	struct qib_knx_sdma *sdma;
++	struct task_struct *sdma_poll;
++	atomic_t tref;
++	char tname[64];
++	struct qib_knx_rma tidmem;
 +};
-+
-+#define CLIENT_THREAD_NAME(x) "qib/mic" __stringify(x)
 +
 +static struct qib_knx_server *server;
 +
@@ -947,19 +847,20 @@ index 0000000..c15276f
 +				     void *, size_t, int, const char *);
 +static int qib_knx_unregister_memory(struct qib_knx *, struct qib_knx_rma *,
 +				     const char *);
++static __always_inline void qib_knx_memcpy(void *, void __iomem *, size_t);
 +static ssize_t qib_show_knx_node(struct device *, struct device_attribute *,
 +				 char *);
-+
-+static DEVICE_ATTR(knx_node, S_IRUGO, qib_show_knx_node, NULL);
-+static ssize_t qib_show_knx_node(struct device *dev,
-+				 struct device_attribute *attr, char *buf)
-+{
-+	struct qib_ibdev *ibdev =
-+		container_of(dev, struct qib_ibdev, ibdev.dev);
-+	struct qib_devdata *dd = dd_from_dev(ibdev);
-+
-+	return scnprintf(buf, PAGE_SIZE, "%u\n", dd->knx->peer.node);
-+}
++static int qib_knx_sdma_init(struct qib_knx *);
++static void qib_knx_sdma_teardown(struct qib_knx *);
++static __always_inline struct page *
++qib_knx_phys_to_page(struct qib_knx *, unsigned long);
++static int qib_knx_sdma_pkts_to_descs(struct qib_knx_ctxt *,
++				      struct qib_knx_sdma_desc *,
++				      struct qib_user_sdma_queue *,
++				      int *, struct list_head *);
++static int qib_knx_sdma_poll(void *);
++static int qib_knx_tidrcv_init(struct qib_knx *);
++static int qib_knx_tidrcv_teardown(struct qib_knx *);
 +
 +inline struct qib_knx *qib_knx_get(u16 nodeid)
 +{
@@ -982,10 +883,11 @@ index 0000000..c15276f
 +
 +static int qib_knx_init(struct qib_knx_server *server)
 +{
-+	int ret = 0, num_devs = 0, i;
-+	struct qib_devdata *dd;
++	int ret = 0, num_devs = 0, i, seen = 0;
++	unsigned fewest = -1U;
++	struct qib_devdata *dd = NULL, *dd_no_numa = NULL;
 +	struct qib_knx *knx;
-+	struct ib_device *ibdev;
++	struct qib_device_info info = { -1 };
 +
 +	knx = kzalloc(sizeof(*knx), GFP_KERNEL);
 +	if (!knx) {
@@ -999,10 +901,14 @@ index 0000000..c15276f
 +	}
 +
 +	INIT_LIST_HEAD(&knx->list);
++	spin_lock_init(&knx->ctxt_lock);
 +	knx->numa_node = -1;
 +	ret = scif_pci_info(knx->peer.node, &knx->pci_info);
-+	if (!ret)
++	if (!ret) {
 +		knx->numa_node = pcibus_to_node(knx->pci_info.pdev->bus);
++		knx->bar = pci_resource_start(knx->pci_info.pdev, 0);
++		knx->barlen = pci_resource_len(knx->pci_info.pdev, 0);
++	}
 +
 +	if (knx->numa_node < 0)
 +		knx->numa_node = numa_node_id();
@@ -1010,40 +916,58 @@ index 0000000..c15276f
 +	num_devs = qib_count_units(NULL, NULL);
 +	if (unlikely(!num_devs)) {
 +		ret = -ENODEV;
++		/* we have to send this */
++		scif_send(knx->epd.epd, &info, sizeof(info),
++			  SCIF_SEND_BLOCK);
 +		goto done;
 +	}
 +
-+	for (i = 0; i < num_devs; i++) {
++	/*
++	 * Attempt to find an HCA on the same NUMA node as the card. Save
++	 * the first HCA that hasn't been associated with a card in case
++	 * there is no HCA on the same NUMA node.
++	 */
++	for (i = 0; seen < num_devs; i++) {
 +		dd = qib_lookup(i);
-+		if (dd && dd->local_node_id == knx->numa_node)
-+			knx->dd = dd;
++		if (dd) {
++			if (dd->assigned_node_id == knx->numa_node) {
++				knx->dd = dd;
++				break;
++			} else if (dd->num_knx < fewest)
++				dd_no_numa = dd;
++			seen++;
++		}
 +	}
 +	/*
 +	 * We didn't find a QIB device on the same NUMA node,
-+	 * round-robin across all devices.
++	 * use the "backup".
 +	 */
 +	if (unlikely(!knx->dd)) {
-+		knx->dd = qib_lookup(server->nclients % num_devs);
-+		/* it is possible for qib_lookup to return NULL */
-+		if (unlikely(!knx->dd)) {
++		if (!dd_no_numa) {
 +			ret = -ENODEV;
++			/* we have to send this */
++			scif_send(knx->epd.epd, &info, sizeof(info),
++				  SCIF_SEND_BLOCK);
 +			goto done;
 +		}
++		knx->dd = dd_no_numa;
 +	}
-+	knx->dd->node_id = knx->peer.node;
-+	knx->dd->knx = knx;
++	knx->dd->num_knx++;
++
 +	knx->ctxts = kzalloc_node(knx->dd->ctxtcnt * sizeof(*knx->ctxts),
 +				  GFP_KERNEL, knx->numa_node);
 +	if (!knx->ctxts)
 +		ret = -ENOMEM;
-+	ibdev = &knx->dd->verbs_dev.ibdev;
-+	ret = device_create_file(&ibdev->dev, &dev_attr_knx_node);
++	/* Give the KNX the associated device information. */
++	info.unit = knx->dd->unit;
++	ret = scif_send(knx->epd.epd, &info, sizeof(info),
++			SCIF_SEND_BLOCK);
++
++	ret = qib_knx_sdma_init(knx);
 +	if (ret)
-+		/*
-+		 * clear the error code since we don't want to fail the
-+		 * initialization.
-+		 */
-+		ret = 0;
++		goto done;
++	atomic_set(&knx->tref, 0);
++	ret = qib_knx_tidrcv_init(knx);
 +done:
 +	spin_lock(&server->client_lock);
 +	list_add_tail(&knx->list, &server->clients);
@@ -1057,13 +981,12 @@ index 0000000..c15276f
 +static void qib_knx_free(struct qib_knx *knx, int unload)
 +{
 +	struct qib_devdata *dd = knx->dd;
-+	struct ib_device *ibdev;
 +	int i;
 +
-+	if (dd) {
-+		ibdev = &dd->verbs_dev.ibdev;
-+		device_remove_file(&ibdev->dev, &dev_attr_knx_node);
-+	}
++	qib_knx_tidrcv_teardown(knx);
++	qib_knx_sdma_teardown(knx);
++	if (dd)
++		dd->num_knx--;
 +	/*
 +	 * If this function is called with unload set, we can
 +	 * free the context data. Otherwise, we are here
@@ -1180,9 +1103,16 @@ index 0000000..c15276f
 +	return ret;
 +}
 +
-+int qib_knx_alloc_ctxt(struct qib_devdata *dd, unsigned ctxt)
++static __always_inline void qib_knx_memcpy(void *dst, void __iomem *src,
++					   size_t size)
 +{
-+	struct qib_knx *knx = dd_to_knx(dd);
++	memcpy_fromio(dst, src, size);
++}
++
++int qib_knx_alloc_ctxt(u16 node_id, unsigned ctxt)
++{
++	struct qib_knx *knx = qib_knx_get(node_id);
++	struct qib_devdata *dd = knx->dd;
 +	struct qib_knx_ctxt *ptr;
 +	int ret = 0;
 +
@@ -1199,7 +1129,14 @@ index 0000000..c15276f
 +		ret = -ENOMEM;
 +		goto bail;
 +	}
++	ptr->knx = knx;
++	ptr->ctxt = ctxt;
++	ptr->ppd = dd->rcd[ctxt]->ppd;
++
++	spin_lock(&knx->ctxt_lock);
 +	knx->ctxts[ctxt] = ptr;
++	dd->rcd[ctxt]->krcd = ptr;
++	spin_unlock(&knx->ctxt_lock);
 +bail:
 +	return ret;
 +}
@@ -1208,10 +1145,11 @@ index 0000000..c15276f
 +			enum qib_knx_ctxtinfo_type type,
 +			struct file *fp)
 +{
-+	struct qib_knx *knx = dd_to_knx(rcd->dd);
++	struct qib_knx *knx = rcd->krcd->knx;
 +	__u16 subctxt;
 +	__u64 ret = 0;
 +
++	spin_lock(&knx->ctxt_lock);
 +	if (!knx || !knx->ctxts || !knx->ctxts[rcd->ctxt])
 +		goto done;
 +
@@ -1234,6 +1172,7 @@ index 0000000..c15276f
 +		break;
 +	}
 +done:
++	spin_unlock(&knx->ctxt_lock);
 +	return ret;
 +}
 +
@@ -1244,7 +1183,7 @@ index 0000000..c15276f
 +	char buf[16];
 +	off_t offset;
 +	int ret = 0;
-+	struct qib_knx *knx = dd_to_knx(dd);
++	struct qib_knx *knx = rcd->krcd->knx;
 +
 +	if (unlikely(!knx)) {
 +		ret = -ENODEV;
@@ -1292,7 +1231,7 @@ index 0000000..c15276f
 +{
 +	int ret = 0;
 +	off_t offset;
-+	struct qib_knx *knx = dd_to_knx(dd);
++	struct qib_knx *knx = rcd->krcd->knx;
 +
 +	if (unlikely(!knx)) {
 +		ret = -ENODEV;
@@ -1353,7 +1292,7 @@ index 0000000..c15276f
 +{
 +	struct qib_knx_mem_map_sg *mapsg;
 +	struct qib_knx_mem_map *map;
-+	struct qib_knx *knx = dd_to_knx(dd);
++	struct qib_knx *knx = rcd->krcd->knx;
 +	dma_addr_t offset;
 +	struct scatterlist *sg;
 +	unsigned num_pages;
@@ -1410,7 +1349,8 @@ index 0000000..c15276f
 +	 * can use 64bit addresses for DMA but the CPU might not.
 +	 * (see pci_set_dma_mask() in qib_pcie.c).
 +	 */
-+	mapsg->sglist = kzalloc(num_pages * sizeof(*mapsg->sglist), GFP_KERNEL);
++	mapsg->sglist = kzalloc_node(num_pages * sizeof(*mapsg->sglist),
++				     GFP_KERNEL, knx->numa_node);
 +	if (!mapsg->sglist) {
 +		ret = -ENOMEM;
 +		goto bail_rcvq_pages;
@@ -1426,7 +1366,7 @@ index 0000000..c15276f
 +	}
 +	/*
 +	 * pci_map_sg() will remap all 128 pages of the
-+	 * scatterlist seperately (without coalescing them).
++	 * scatterlist separately (without coalescing them).
 +	 * However, since the buffer is contiguous, as long
 +	 * as the base address is mapped correctly, everything
 +	 * should work. In any case, check that the mapped
@@ -1520,7 +1460,7 @@ index 0000000..c15276f
 +	struct qib_knx_mem_map_sg *map;
 +	struct scatterlist *sg;
 +	struct qib_devdata *dd = rcd->dd;
-+	struct qib_knx *knx = dd_to_knx(dd);
++	struct qib_knx *knx = rcd->krcd->knx;
 +	unsigned size, egrsize, egrcnt, num_pages, bufs_ppage,
 +		egrbufcnt;
 +	dma_addr_t dma_addr, page;
@@ -1598,7 +1538,8 @@ index 0000000..c15276f
 +
 +	map->size = size;
 +	map->dir = DMA_BIDIRECTIONAL;
-+	map->sglist = kzalloc(num_pages * sizeof(*map->sglist), GFP_KERNEL);
++	map->sglist = kzalloc_node(num_pages * sizeof(*map->sglist), GFP_KERNEL,
++				   knx->numa_node);
 +	if (!map->sglist) {
 +		ret = -ENOMEM;
 +		goto bail_free_rcvegr_phys;
@@ -1619,10 +1560,10 @@ index 0000000..c15276f
 +		rcd->rcvegrbuf[i] = map->pages->va[i];
 +	}
 +
-+	for (egrbufcnt = i = 0; i < num_pages ; i++) {
++	for (egrbufcnt = i = 0; i < num_pages; i++) {
 +		page = rcd->rcvegrbuf_phys[i];
 +		dma_addr = page;
-+		for (bufcnt = 0 ; egrbufcnt < egrcnt && bufcnt < bufs_ppage;
++		for (bufcnt = 0; egrbufcnt < egrcnt && bufcnt < bufs_ppage;
 +		     egrbufcnt++, bufcnt++) {
 +			dd->f_put_tid(dd, rcd->rcvegr_tid_base +
 +					   egrbufcnt +
@@ -1650,7 +1591,7 @@ index 0000000..c15276f
 +
 +void qib_knx_free_ctxtdata(struct qib_devdata *dd, struct qib_ctxtdata *rcd)
 +{
-+	struct qib_knx *knx = dd_to_knx(dd);
++	struct qib_knx *knx = rcd->krcd->knx;
 +	struct qib_knx_ctxt *ctxt;
 +	char buf[16];
 +	int i, ret = 0;
@@ -1658,7 +1599,11 @@ index 0000000..c15276f
 +	if (!rcd || !knx || !knx->ctxts)
 +		return;
 +
++	spin_lock(&knx->ctxt_lock);
 +	ctxt = knx->ctxts[rcd->ctxt];
++	knx->ctxts[rcd->ctxt] = NULL;
++	spin_unlock(&knx->ctxt_lock);
++
 +	if (!ctxt)
 +		return;
 +
@@ -1704,10 +1649,533 @@ index 0000000..c15276f
 +		qib_knx_unregister_memory(knx, &ctxt->piobufs[i], buf);
 +	}
 +
-+	/* MITKO XXX: handle rcd->tid_pg_list */
-+	knx->ctxts[rcd->ctxt] = NULL;
 +	kfree(ctxt);
 +	kfree(rcd);
++}
++
++/*
++ * TID management for processes on the MIC happens on the MIC. Therefore,
++ * we only register the HW TID array here.
++ * The MIC will calculate TID array offsets using the same algorithm is
++ * the host. Therefore, it is OK that the entire HW TID array is mapped
++ * since neither side should step on the other.
++ */
++static int qib_knx_tidrcv_init(struct qib_knx *knx)
++{
++	struct qib_devdata *dd = knx->dd;
++	struct qib_knx_tid_info info;
++	void *tidbase;
++	int ret = 0;
++	off_t offset = 0;
++	size_t len;
++	char buf[64];
++
++	memset(&info, 0, sizeof(info));
++
++	info.tidcnt = dd->rcvtidcnt;
++	tidbase = ((char *)dd->kregbase + dd->rcvtidbase);
++	info.tidbase_len = dd->ctxtcnt * dd->rcvtidcnt * sizeof(tidbase);
++	info.tidtemplate = dd->tidtemplate;
++	info.invalidtid = dd->tidinvalid;
++	/* information needed to properly calculate DMA address to MIC pages */
++	info.bar_addr = knx->bar;
++	info.bar_len = knx->barlen;
++
++	snprintf(buf, sizeof(buf), "TID array KNx%u", knx->peer.node);
++	offset = qib_knx_register_memory(knx, &knx->tidmem, tidbase,
++					 info.tidbase_len, SCIF_PROT_WRITE,
++					 buf);
++	info.tidbase_offset = offset;
++	if (IS_ERR_VALUE(offset))
++		ret = offset;
++	len = scif_send(knx->epd.epd, &info, sizeof(info),
++			SCIF_SEND_BLOCK);
++	if (len < sizeof(info))
++		ret = -EFAULT;
++	return ret;
++}
++
++static int qib_knx_tidrcv_teardown(struct qib_knx *knx)
++{
++	char buf[64];
++	snprintf(buf, sizeof(buf), "TID array KNx%u", knx->peer.node);
++	return qib_knx_unregister_memory(knx, &knx->tidmem, buf);
++}
++
++static int qib_knx_sdma_init(struct qib_knx *knx)
++{
++	struct qib_knx_host_mem flags;
++	struct qib_knx_knc_mem mflags;
++	struct qib_knx_sdma *sdma;
++	char buf[64];
++	int ret = 0;
++
++	sdma = kzalloc_node(sizeof(*sdma), GFP_KERNEL, knx->numa_node);
++	if (!sdma) {
++		ret = -ENOMEM;
++		goto done;
++	}
++	sdma->hflags = kzalloc_node(PAGE_SIZE, GFP_KERNEL, knx->numa_node);
++	if (!sdma->hflags) {
++		ret = -ENOMEM;
++		goto done_free;
++	}
++	snprintf(buf, sizeof(buf), "Host SDMA flags KNx%u", knx->peer.node);
++	flags.flags_offset = qib_knx_register_memory(knx, &sdma->hflags_mem,
++						     sdma->hflags,
++						     PAGE_SIZE,
++						     SCIF_PROT_WRITE,
++						     buf);
++	if (IS_ERR_VALUE(flags.flags_offset)) {
++		ret = flags.flags_offset;
++		goto free_flags;
++	}
++	sdma->desc_num = knx->dd->pport[0].sdma_descq_cnt;
++	flags.desc_num = sdma->desc_num;
++	ret = scif_send(knx->epd.epd, &flags, sizeof(flags),
++			SCIF_SEND_BLOCK);
++	if (ret < sizeof(flags))
++		goto unregister;
++	ret = scif_recv(knx->epd.epd, &mflags, sizeof(mflags),
++			SCIF_RECV_BLOCK);
++	if (ret < sizeof(mflags)) {
++		ret = -EINVAL;
++		goto unregister;
++	}
++	ret = scif_get_pages(knx->epd.epd, mflags.flags_offset,
++			     PAGE_SIZE, &sdma->mflag_pages);
++	if (ret < 0 || !sdma->mflag_pages->nr_pages) {
++		ret = -EFAULT;
++		goto unregister;
++	}
++	sdma->mflags = sdma->mflag_pages->va[0];
++	ret = scif_get_pages(knx->epd.epd, mflags.queue_offset,
++			     mflags.queue_len, &sdma->queue_pages);
++	if (ret < 0)
++		goto put_flags;
++	if ((sdma->queue_pages->nr_pages * PAGE_SIZE) !=
++	    mflags.queue_len) {
++		ret = -EFAULT;
++		goto put_queue;
++	}
++	sdma->queue = sdma->queue_pages->va[0];
++	sdma->complete = -1;
++	sdma->head = -1;
++	/* set the initial trigger value */
++	QIB_KNX_SDMA_SET(sdma->hflags->trigger, -1);
++	QIB_KNX_SDMA_SET(sdma->mflags->complete, sdma->complete);
++	snprintf(knx->tname, sizeof(knx->tname), "qib/mic%u/poll",
++		 knx->peer.node);
++	knx->sdma = sdma;
++	ret = 0;
++	goto done;
++put_queue:
++	scif_put_pages(sdma->queue_pages);
++put_flags:
++	scif_put_pages(sdma->mflag_pages);
++unregister:
++	qib_knx_unregister_memory(knx, &sdma->hflags_mem, buf);
++free_flags:
++	kfree(sdma->hflags);
++done_free:
++	kfree(sdma);
++done:
++	/*
++	 * we have to respond to the MIC so it doesn't get stuck
++	 * in the scif_recv call
++	 */
++	scif_send(knx->epd.epd, &ret, sizeof(ret), SCIF_SEND_BLOCK);
++	return ret;
++}
++
++static void qib_knx_sdma_teardown(struct qib_knx *knx)
++{
++	int ret;
++	if (knx->sdma_poll)
++		ret = kthread_stop(knx->sdma_poll);
++	if (knx->sdma) {
++		if (knx->sdma->queue_pages->nr_pages) {
++			knx->sdma->queue = NULL;
++			scif_put_pages(knx->sdma->queue_pages);
++		}
++		if (knx->sdma->mflag_pages->nr_pages) {
++			knx->sdma->mflags = NULL;
++			scif_put_pages(knx->sdma->mflag_pages);
++		}
++		kfree(knx->sdma->hflags);
++		kfree(knx->sdma);
++		knx->sdma = NULL;
++	}
++}
++
++int qib_knx_sdma_queue_create(struct file *fd)
++{
++	struct qib_ctxtdata *rcd = ctxt_fp(fd);
++	struct qib_devdata *dd = rcd->dd;
++	struct qib_knx *knx = rcd->krcd->knx;
++	struct qib_knx_ctxt *ctxt = knx->ctxts[rcd->ctxt];
++	u8 subctxt = subctxt_fp(fd);
++	int ret = 0;
++
++	if (!ctxt) {
++		ret = -EINVAL;
++		goto done;
++	}
++	ctxt->pq[subctxt] = qib_user_sdma_queue_create(&dd->pcidev->dev,
++						       dd->unit, rcd->ctxt,
++						       subctxt);
++	if (!ctxt->pq[subctxt])
++		ret = -ENOMEM;
++	user_sdma_queue_fp(fd) = ctxt->pq[subctxt];
++	/*
++	 * We start the polling thread the first time a user SDMA
++	 * queue is created. There is no reason to take up CPU
++	 * cycles before then.
++	 */
++	if (atomic_inc_return(&knx->tref) == 1) {
++		knx->sdma_poll = kthread_run(qib_knx_sdma_poll, knx,
++					     knx->tname);
++		if (IS_ERR(knx->sdma_poll)) {
++			ret = -PTR_ERR(knx->sdma_poll);
++			atomic_dec(&knx->tref);
++			goto free_queue;
++		}
++	}
++	goto done;
++free_queue:
++	user_sdma_queue_fp(fd) = NULL;
++	qib_user_sdma_queue_destroy(ctxt->pq[subctxt]);
++	ctxt->pq[subctxt] = NULL;
++done:
++	return ret;
++}
++
++void qib_knx_sdma_queue_destroy(struct qib_filedata *fd)
++{
++	struct qib_ctxtdata *rcd = fd->rcd;
++	struct qib_knx *knx;
++	unsigned ctxt = rcd->ctxt, subctxt = fd->subctxt;
++
++	/* Host processes do not have a KNX rcd pointer. */
++	if (!rcd->krcd)
++		return;
++	knx = rcd->krcd->knx;
++	/* We still have the memory pointer through fd->pq */
++	spin_lock(&knx->ctxt_lock);
++	if (knx->ctxts[ctxt])
++		knx->ctxts[ctxt]->pq[subctxt] = NULL;
++	spin_unlock(&knx->ctxt_lock);
++	if (atomic_dec_and_test(&knx->tref)) {
++		int ret = kthread_stop(knx->sdma_poll);
++		knx->sdma_poll = NULL;
++	}
++}
++
++/*
++ * Convert a MIC physical address to the corresponding host page.
++ */
++static __always_inline struct page *
++qib_knx_phys_to_page(struct qib_knx *knx, unsigned long addr) {
++	unsigned long paddr;
++	if ((knx->bar + addr + PAGE_SIZE) >
++	    (knx->bar + knx->barlen))
++		return NULL;
++	paddr = knx->bar + addr;
++	return pfn_to_page(paddr >> PAGE_SHIFT);
++}
++
++static int qib_knx_sdma_pkts_to_descs(struct qib_knx_ctxt *ctxt,
++				      struct qib_knx_sdma_desc *desc,
++				      struct qib_user_sdma_queue *pq,
++				      int *ndesc, struct list_head *list)
++{
++	struct qib_knx *knx = ctxt->knx;
++	struct qib_user_sdma_pkt *pkt;
++	dma_addr_t pbc_dma_addr;
++	unsigned pktnw, pbcnw;
++	u32 counter;
++	u16 frag_size;
++	int ret = 0;
++	__le32 *pbc;
++
++	counter = pq->counter;
++
++	pbc = qib_user_sdma_alloc_header(pq, desc->pbclen, &pbc_dma_addr);
++	if (!pbc) {
++		ret = -ENOMEM;
++		goto done;
++	}
++	memcpy(pbc, desc->pbc, desc->pbclen);
++
++	pktnw = (le32_to_cpu(*pbc) & 0xFFFF);
++	/*
++	 * This assignment is a bit strange.  it's because the
++	 * the pbc counts the number of 32 bit words in the full
++	 * packet _except_ the first word of the pbc itself...
++	 */
++	pbcnw = (desc->pbclen >> 2) - 1;
++
++	if (pktnw < pbcnw) {
++		ret = -EINVAL;
++		goto free_pbc;
++	}
++
++	if (pktnw != ((desc->length >> 2) + pbcnw)) {
++		ret = -EINVAL;
++		goto free_pbc;
++	}
++
++	frag_size = (le32_to_cpu(*pbc)>>16) & 0xFFFF;
++	if (((frag_size ? frag_size : desc->length) + desc->pbclen) >
++	    ctxt->ppd->ibmaxlen) {
++		ret = -EINVAL;
++		goto free_pbc;
++	}
++	if (frag_size) {
++		/* new SDMA "protocol" */
++		unsigned pktsize, n;
++
++		n = desc->npages * ((2 * PAGE_SIZE / frag_size) + 1);
++		pktsize = sizeof(*pkt) + sizeof(pkt->addr[0]) * n;
++
++		pkt = kzalloc(pktsize + desc->tidlen, GFP_KERNEL);
++		if (!pkt) {
++			ret = -ENOMEM;
++			goto free_pbc;
++		}
++		pkt->largepkt = 1;
++		pkt->frag_size = frag_size;
++		pkt->addrlimit = n + ARRAY_SIZE(pkt->addr);
++
++		if (desc->tidlen) {
++			char *tidsmptr = (char *)pkt + pktsize;
++			memcpy(tidsmptr, desc->tidsm, desc->tidlen);
++			pkt->tidsm =
++				(struct qib_tid_session_member *)tidsmptr;
++			pkt->tidsmcount = desc->tidlen /
++				sizeof(*desc->tidsm);
++			pkt->tidsmidx = 0;
++		}
++		*pbc = cpu_to_le32(le32_to_cpu(*pbc) & 0x0000FFFF);
++	} else {
++		/* old SDMA */
++		pkt = kmem_cache_alloc(pq->pkt_slab, GFP_KERNEL);
++		if (!pkt) {
++			ret = -ENOMEM;
++			goto free_pbc;
++		}
++		pkt->largepkt = 0;
++		pkt->frag_size = desc->length;
++		pkt->addrlimit = ARRAY_SIZE(pkt->addr);
++	}
++	pkt->bytes_togo = desc->length;
++	pkt->payload_size = 0;
++	pkt->counter = counter;
++	pkt->tiddma = !!desc->tidlen;
++	/*
++	 * The generic user SDMA code will use this as a flag to
++	 * decide whether to call the KNx-specific pkt free
++	 * function. However, it doesn't know what the value
++	 * actually means.
++	 */
++	pkt->remote = (u64)knx;
++
++	qib_user_sdma_init_frag(pkt, 0,
++				0, desc->pbclen,
++				1, 0,
++				0, 0,
++				NULL, pbc,
++				pbc_dma_addr, desc->pbclen);
++	pkt->index = 0;
++	pkt->naddr = 1;
++
++	if (desc->npages) {
++		/* we have user data */
++		int i;
++		struct page *page;
++		unsigned plen = 0, len = desc->length;
++		for (i = 0; i < desc->npages; i++) {
++			unsigned long off = (i == 0 ? desc->offset : 0);
++			plen = (len > PAGE_SIZE ? PAGE_SIZE : len);
++			page = qib_knx_phys_to_page(knx, desc->pages[i]);
++			ret = qib_user_sdma_page_to_frags(knx->dd, pq,
++				   pkt, page, 0, off,
++				   (off + plen > PAGE_SIZE ?
++				    PAGE_SIZE - off : plen),
++				   NULL);
++			if (ret < 0)
++				goto free_sdma;
++			len -= plen - off;
++		}
++	} else {
++		pkt->addr[0].last_desc = 1;
++		if (pbc_dma_addr == 0) {
++			pbc_dma_addr = dma_map_single(&knx->dd->pcidev->dev,
++						      pbc, desc->pbclen,
++						      DMA_TO_DEVICE);
++			if (dma_mapping_error(&knx->dd->pcidev->dev,
++					      pbc_dma_addr)) {
++				ret = -ENOMEM;
++				goto free_sdma;
++			}
++			pkt->addr[0].addr = pbc_dma_addr;
++			pkt->addr[0].dma_mapped = 1;
++		}
++	}
++	counter++;
++	pkt->pq = pq;
++	pkt->index = 0;
++	*ndesc = pkt->naddr;
++
++	list_add_tail(&pkt->list, list);
++	goto done;
++free_sdma:
++	if (pkt->largepkt)
++		kfree(pkt);
++	else
++		kmem_cache_free(pq->pkt_slab, pkt);
++free_pbc:
++	if (pbc_dma_addr)
++		dma_pool_free(pq->header_cache, pbc, pbc_dma_addr);
++	else
++		kfree(pbc);
++done:
++	return ret;
++}
++
++void qib_knx_sdma_free_pkt(struct qib_user_sdma_pkt *pkt)
++{
++	struct qib_knx *knx = (struct qib_knx *)pkt->remote;
++	struct qib_knx_sdma *sdma = knx->sdma;
++	sdma_next(sdma, complete);
++	QIB_KNX_SDMA_SET(sdma->mflags->complete, sdma->complete);
++}
++
++static int qib_knx_sdma_poll(void *data)
++{
++	struct qib_knx *knx = (struct qib_knx *)data;
++	struct qib_knx_ctxt *ctxt;
++	struct qib_knx_sdma_desc desc;
++	struct qib_knx_sdma *sdma = knx->sdma;
++	struct qib_user_sdma_queue *pq;
++	struct list_head list;
++	u32 new_head;
++	int ret = 0, ndesc = 0, added;
++
++	if (!sdma)
++		return -EFAULT;
++
++	while (!kthread_should_stop()) {
++		added = 0;
++		new_head = QIB_KNX_SDMA_VALUE(sdma->hflags->trigger);
++		while (sdma->head != new_head) {
++			knx_sdma_next(sdma);
++			qib_knx_memcpy(&desc, sdma->queue + sdma->head,
++				       sizeof(desc));
++			if (!desc.ctxt) {
++				QIB_KNX_SDMA_STATUS(sdma, -EINVAL);
++				continue;
++			}
++			spin_lock(&knx->ctxt_lock);
++			ctxt = knx->ctxts[desc.ctxt];
++			if (!ctxt) {
++				/* we should never get here */
++				QIB_KNX_SDMA_STATUS(sdma, -EINVAL);
++				goto done_unlock;
++			}
++			pq = ctxt->pq[desc.subctxt];
++			if (!pq) {
++				QIB_KNX_SDMA_STATUS(sdma, -EFAULT);
++				goto done_unlock;
++			}
++			mutex_lock(&pq->lock);
++			if (pq->added > ctxt->ppd->sdma_descq_removed)
++				qib_user_sdma_hwqueue_clean(ctxt->ppd);
++			if (pq->num_sending)
++				qib_user_sdma_queue_clean(ctxt->ppd, pq);
++
++			INIT_LIST_HEAD(&list);
++			ret = qib_knx_sdma_pkts_to_descs(ctxt, &desc, pq,
++							 &ndesc, &list);
++			QIB_KNX_SDMA_STATUS(sdma, ret);
++			if (!list_empty(&list)) {
++				if (qib_sdma_descq_freecnt(ctxt->ppd) <
++				    ndesc) {
++					qib_user_sdma_hwqueue_clean(
++						ctxt->ppd);
++					if (pq->num_sending)
++						qib_user_sdma_queue_clean(
++							ctxt->ppd, pq);
++				}
++				ret = qib_user_sdma_push_pkts(ctxt->ppd,
++							      pq, &list, 1);
++				if (ret < 0)
++					goto free_pkts;
++				else {
++					pq->counter++;
++					added++;
++				}
++			}
++free_pkts:
++			if (!list_empty(&list))
++				qib_user_sdma_free_pkt_list(
++					&knx->dd->pcidev->dev, pq, &list);
++			mutex_unlock(&pq->lock);
++done_unlock:
++			spin_unlock(&knx->ctxt_lock);
++		}
++		if (!added) {
++			int i;
++			/*
++			 * Push the queues along
++			 * The polling thread will enter the inner loop only
++			 * if the KNX has posted new descriptors to the queue.
++			 * However, any packets that have been completed by
++			 * the HW need to be cleaned and that won't happen
++			 * unless we explicitly check.
++			 */
++			for (i = 0;
++			     i < knx->dd->ctxtcnt * QLOGIC_IB_MAX_SUBCTXT;
++			     i++) {
++				int c = i / QLOGIC_IB_MAX_SUBCTXT,
++					s = i % QLOGIC_IB_MAX_SUBCTXT;
++				spin_lock(&knx->ctxt_lock);
++				ctxt = knx->ctxts[c];
++				if (!ctxt)
++					goto loop_unlock;
++				pq = ctxt->pq[s];
++				if (!pq)
++					goto loop_unlock;
++				mutex_lock(&pq->lock);
++				if (pq->num_sending)
++					qib_user_sdma_queue_clean(ctxt->ppd,
++								  pq);
++				mutex_unlock(&pq->lock);
++loop_unlock:
++				spin_unlock(&knx->ctxt_lock);
++			}
++			might_sleep();
++		}
++	}
++	return ret;
++}
++
++void qib_knx_remove_device(struct qib_devdata *dd)
++{
++	if (server && dd->num_knx) {
++		struct qib_knx *knx, *knxp;
++		list_for_each_entry_safe(knx, knxp, &server->clients, list) {
++			if (knx->dd == dd) {
++				spin_lock(&server->client_lock);
++				list_del(&knx->list);
++				server->nclients--;
++				spin_unlock(&server->client_lock);
++				qib_knx_free(knx, 0);
++				kfree(knx);
++			}
++		}
++	}
++	return;
 +}
 +
 +int __init qib_knx_server_init(void)
@@ -1728,7 +2196,6 @@ index 0000000..c15276f
 +{
 +	if (server) {
 +		struct qib_knx *t, *tt;
-+
 +		/* Stop the thread so we don't accept any new connections. */
 +		kthread_stop(server->kthread);
 +		list_for_each_entry_safe(t, tt, &server->clients, list) {
@@ -1743,12 +2210,12 @@ index 0000000..c15276f
 +}
 diff --git a/drivers/infiniband/hw/qib/qib_knx.h b/drivers/infiniband/hw/qib/qib_knx.h
 new file mode 100644
-index 0000000..d767a60
+index 0000000..0e8d7ce
 --- /dev/null
 +++ b/drivers/infiniband/hw/qib/qib_knx.h
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,74 @@
 +/*
-+ * Copyright (c) 2012 Intel Corporation. All rights reserved.
++ * Copyright (c) 2012, 2013 Intel Corporation. All rights reserved.
 + *
 + * This software is available to you under a choice of one of two
 + * licenses.  You may choose to be licensed under the terms of the GNU
@@ -1791,15 +2258,15 @@ index 0000000..d767a60
 +	QIB_KNX_CTXTINFO_FLAGS
 +};
 +
++#ifdef QIB_CONFIG_KNX
 +int __init qib_knx_server_init(void);
 +void __exit qib_knx_server_exit(void);
-+static __always_inline struct qib_knx *dd_to_knx(struct qib_devdata *dd)
-+{
-+	return (struct qib_knx *)dd->knx;
-+}
++
++void qib_knx_remove_device(struct qib_devdata *);
++
 +inline struct qib_knx *qib_knx_get(uint16_t);
 +inline struct qib_devdata *qib_knx_node_to_dd(uint16_t);
-+int qib_knx_alloc_ctxt(struct qib_devdata *, unsigned);
++int qib_knx_alloc_ctxt(u16, unsigned);
 +int qib_knx_setup_piobufs(struct qib_devdata *, struct qib_ctxtdata *, __u16);
 +int qib_knx_setup_pioregs(struct qib_devdata *, struct qib_ctxtdata *,
 +			  struct qib_base_info *);
@@ -1809,13 +2276,24 @@ index 0000000..d767a60
 +void qib_knx_free_ctxtdata(struct qib_devdata *, struct qib_ctxtdata *);
 +__u64 qib_knx_ctxt_info(struct qib_ctxtdata *, enum qib_knx_ctxtinfo_type,
 +			struct file *);
++int qib_knx_sdma_queue_create(struct file *);
++void qib_knx_sdma_queue_destroy(struct qib_filedata *);
++#else
++static inline u64 qib_knx_ctxt_info(
++	struct qib_ctxtdata *rcd,
++	enum qib_knx_ctxtinfo_type type,
++	struct file *fp)
++{
++	return 0;
++}
++#endif
 +#endif /* _QIB_KNX_H */
-diff --git a/drivers/infiniband/hw/qib/qib_knx_sdma.h b/drivers/infiniband/hw/qib/qib_knx_sdma.h
+diff --git a/drivers/infiniband/hw/qib/qib_knx_common.h b/drivers/infiniband/hw/qib/qib_knx_common.h
 new file mode 100644
-index 0000000..8c67b1f
+index 0000000..53c521f
 --- /dev/null
-+++ b/drivers/infiniband/hw/qib/qib_knx_sdma.h
-@@ -0,0 +1,105 @@
++++ b/drivers/infiniband/hw/qib/qib_knx_common.h
+@@ -0,0 +1,126 @@
 +/*
 + * Copyright (c) 2013 Intel Corporation. All rights reserved.
 + *
@@ -1847,11 +2325,15 @@ index 0000000..8c67b1f
 + * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 + * SOFTWARE.
 + */
-+#ifndef _QIB_KNX_SDMA_H
-+#define _QIB_KNX_SDMA_H
++#ifndef _QIB_KNX_COMMON_H
++#define _QIB_KNX_COMMON_H
++
++struct qib_device_info {
++	u16 unit;
++};
 +
 +#define QIB_SDMA_MAX_NPAGES 33
-+#define QIB_KNX_SDMA_VALUE(fld) (volatile u64)fld
++#define QIB_KNX_SDMA_VALUE(fld) ((volatile u64)fld)
 +#define QIB_KNX_SDMA_SET(fld, val)		\
 +	do {					\
 +		fld = (u64)(val);		\
@@ -1870,9 +2352,9 @@ index 0000000..8c67b1f
 +};
 +
 +struct qib_tid_sm {
-+        __u16 tid;
-+        __u16 offset;
-+        __u16 length;
++	__u16 tid;
++	__u16 offset;
++	__u16 length;
 +};
 +
 +/*
@@ -1889,7 +2371,7 @@ index 0000000..8c67b1f
 +	u64 length;
 +	u32 npages;
 +	unsigned tidlen;
-+        off_t offset;
++	off_t offset;
 +	unsigned long pages[QIB_SDMA_MAX_NPAGES];
 +	/* This array is 198B so the compiler will pad
 +	 * it by 2B to make it multiple of 8B. */
@@ -1913,6 +2395,9 @@ index 0000000..8c67b1f
 +	u64 __padding[7];
 +};
 +
++#define sdma_next(s, fld) \
++	((s)->fld = (((s)->fld + 1) == (s)->desc_num) ? 0 : ((s)->fld + 1))
++
 +struct qib_knx_sdma_mflags {
 +	u64 status;
 +	u64 __padding1[7];
@@ -1920,61 +2405,407 @@ index 0000000..8c67b1f
 +	u64 __padding2[7];
 +};
 +
-+#endif /* _QIB_KNX_SDMA_H */
-diff --git a/drivers/infiniband/hw/qib/qib_knx_tidrcv.h b/drivers/infiniband/hw/qib/qib_knx_tidrcv.h
-new file mode 100644
-index 0000000..842fca1
---- /dev/null
-+++ b/drivers/infiniband/hw/qib/qib_knx_tidrcv.h
-@@ -0,0 +1,48 @@
-+/*
-+ * Copyright (c) 2013 Intel Corporation. All rights reserved.
-+ *
-+ * This software is available to you under a choice of one of two
-+ * licenses.  You may choose to be licensed under the terms of the GNU
-+ * General Public License (GPL) Version 2, available from the file
-+ * COPYING in the main directory of this source tree, or the
-+ * OpenIB.org BSD license below:
-+ *
-+ *     Redistribution and use in source and binary forms, with or
-+ *     without modification, are permitted provided that the following
-+ *     conditions are met:
-+ *
-+ *      - Redistributions of source code must retain the above
-+ *        copyright notice, this list of conditions and the following
-+ *        disclaimer.
-+ *
-+ *      - Redistributions in binary form must reproduce the above
-+ *        copyright notice, this list of conditions and the following
-+ *        disclaimer in the documentation and/or other materials
-+ *        provided with the distribution.
-+ *
-+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
-+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
-+ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
-+ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
-+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-+ * SOFTWARE.
-+ */
-+#ifndef _QIB_KNX_TIDRCV_H
-+
 +struct qib_knx_tid_info {
 +	/* this is the entire set of 512 entries (= 4K) so
-+         * we can resgister. subctxt devision will be done
-+         * in MIC driver. */
-+        off_t tidbase_offset;
-+        size_t tidbase_len;
-+        u64 tidbase;
-+        unsigned tidcnt;
-+        u64 tidtemplate;
-+        unsigned long invalidtid;
-+        u64 bar_addr;
-+        u64 bar_len;
++	 * we can resgister. subctxt devision will be done
++	 * in MIC driver. */
++	off_t tidbase_offset;
++	size_t tidbase_len;
++	u64 tidbase;
++	unsigned tidcnt;
++	u64 tidtemplate;
++	unsigned long invalidtid;
++	u64 bar_addr;
++	u64 bar_len;
 +};
 +
-+#endif /* QIB_KNX_TIDRCV_H */
--- 
-1.8.3.1
-
++#endif /* _QIB_KNX_COMMON_H */
+diff --git a/drivers/infiniband/hw/qib/qib_user_sdma.c b/drivers/infiniband/hw/qib/qib_user_sdma.c
+index d2806ca..c25bd5a 100644
+--- a/drivers/infiniband/hw/qib/qib_user_sdma.c
++++ b/drivers/infiniband/hw/qib/qib_user_sdma.c
+@@ -63,80 +63,6 @@ struct qib_user_sdma_rb_node {
+ 	pid_t pid;
+ };
+ 
+-struct qib_user_sdma_pkt {
+-	struct list_head list;  /* list element */
+-
+-	u8  tiddma;		/* if this is NEW tid-sdma */
+-	u8  largepkt;		/* this is large pkt from kmalloc */
+-	u16 frag_size;		/* frag size used by PSM */
+-	u16 index;              /* last header index or push index */
+-	u16 naddr;              /* dimension of addr (1..3) ... */
+-	u16 addrlimit;		/* addr array size */
+-	u16 tidsmidx;		/* current tidsm index */
+-	u16 tidsmcount;		/* tidsm array item count */
+-	u16 payload_size;	/* payload size so far for header */
+-	u32 bytes_togo;		/* bytes for processing */
+-	u32 counter;            /* sdma pkts queued counter for this entry */
+-	struct qib_tid_session_member *tidsm;	/* tid session member array */
+-	struct qib_user_sdma_queue *pq;	/* which pq this pkt belongs to */
+-	u64 added;              /* global descq number of entries */
+-
+-	struct {
+-		u16 offset;                     /* offset for kvaddr, addr */
+-		u16 length;                     /* length in page */
+-		u16 first_desc;			/* first desc */
+-		u16 last_desc;			/* last desc */
+-		u16 put_page;                   /* should we put_page? */
+-		u16 dma_mapped;                 /* is page dma_mapped? */
+-		u16 dma_length;			/* for dma_unmap_page() */
+-		u16 padding;
+-		struct page *page;              /* may be NULL (coherent mem) */
+-		void *kvaddr;                   /* FIXME: only for pio hack */
+-		dma_addr_t addr;
+-	} addr[4];   /* max pages, any more and we coalesce */
+-};
+-
+-struct qib_user_sdma_queue {
+-	/*
+-	 * pkts sent to dma engine are queued on this
+-	 * list head.  the type of the elements of this
+-	 * list are struct qib_user_sdma_pkt...
+-	 */
+-	struct list_head sent;
+-
+-	/*
+-	 * Because above list will be accessed by both process and
+-	 * signal handler, we need a spinlock for it.
+-	 */
+-	spinlock_t sent_lock ____cacheline_aligned_in_smp;
+-
+-	/* headers with expected length are allocated from here... */
+-	char header_cache_name[64];
+-	struct dma_pool *header_cache;
+-
+-	/* packets are allocated from the slab cache... */
+-	char pkt_slab_name[64];
+-	struct kmem_cache *pkt_slab;
+-
+-	/* as packets go on the queued queue, they are counted... */
+-	u32 counter;
+-	u32 sent_counter;
+-	/* pending packets, not sending yet */
+-	u32 num_pending;
+-	/* sending packets, not complete yet */
+-	u32 num_sending;
+-	/* global descq number of entry of last sending packet */
+-	u64 added;
+-
+-	/* dma page table */
+-	struct rb_root dma_pages_root;
+-
+-	struct qib_user_sdma_rb_node *sdma_rb_node;
+-
+-	/* protect everything above... */
+-	struct mutex lock;
+-};
+-
+ static struct qib_user_sdma_rb_node *
+ qib_user_sdma_rb_search(struct rb_root *root, pid_t pid)
+ {
+@@ -254,12 +180,12 @@ done:
+ 	return pq;
+ }
+ 
+-static void qib_user_sdma_init_frag(struct qib_user_sdma_pkt *pkt,
+-				    int i, u16 offset, u16 len,
+-				    u16 first_desc, u16 last_desc,
+-				    u16 put_page, u16 dma_mapped,
+-				    struct page *page, void *kvaddr,
+-				    dma_addr_t dma_addr, u16 dma_length)
++void qib_user_sdma_init_frag(struct qib_user_sdma_pkt *pkt,
++			     int i, u16 offset, u16 len,
++			     u16 first_desc, u16 last_desc,
++			     u16 put_page, u16 dma_mapped,
++			     struct page *page, void *kvaddr,
++			     dma_addr_t dma_addr, u16 dma_length)
+ {
+ 	pkt->addr[i].offset = offset;
+ 	pkt->addr[i].length = len;
+@@ -273,7 +199,7 @@ static void qib_user_sdma_init_frag(struct qib_user_sdma_pkt *pkt,
+ 	pkt->addr[i].dma_length = dma_length;
+ }
+ 
+-static void *qib_user_sdma_alloc_header(struct qib_user_sdma_queue *pq,
++void *qib_user_sdma_alloc_header(struct qib_user_sdma_queue *pq,
+ 				size_t len, dma_addr_t *dma_addr)
+ {
+ 	void *hdr;
+@@ -295,11 +221,11 @@ static void *qib_user_sdma_alloc_header(struct qib_user_sdma_queue *pq,
+ 	return hdr;
+ }
+ 
+-static int qib_user_sdma_page_to_frags(const struct qib_devdata *dd,
+-				       struct qib_user_sdma_queue *pq,
+-				       struct qib_user_sdma_pkt *pkt,
+-				       struct page *page, u16 put,
+-				       u16 offset, u16 len, void *kvaddr)
++int qib_user_sdma_page_to_frags(const struct qib_devdata *dd,
++				struct qib_user_sdma_queue *pq,
++				struct qib_user_sdma_pkt *pkt,
++				struct page *page, u16 put,
++				u16 offset, u16 len, void *kvaddr)
+ {
+ 	__le16 *pbc16;
+ 	void *pbcvaddr;
+@@ -314,21 +240,27 @@ static int qib_user_sdma_page_to_frags(const struct qib_devdata *dd,
+ 	int ret = 0;
+ 
+ 	if (dma_mapping_error(&dd->pcidev->dev, dma_addr)) {
+-		/*
+-		 * dma mapping error, pkt has not managed
+-		 * this page yet, return the page here so
+-		 * the caller can ignore this page.
+-		 */
+-		if (put) {
+-			put_page(page);
+-		} else {
+-			/* coalesce case */
+-			kunmap(page);
+-			__free_page(page);
++#ifdef QIB_CONFIG_KNX
++		if (!pkt->remote) {
++#endif
++			/*
++			 * dma mapping error, pkt has not managed
++			 * this page yet, return the page here so
++			 * the caller can ignore this page.
++			 */
++			if (put) {
++				put_page(page);
++			} else {
++				/* coalesce case */
++				kunmap(page);
++				__free_page(page);
++			}
++			ret = -ENOMEM;
++			goto done;
+ 		}
+-		ret = -ENOMEM;
+-		goto done;
++#ifdef QIB_CONFIG_KNX
+ 	}
++#endif
+ 	offset = 0;
+ 	dma_mapped = 1;
+ 
+@@ -630,13 +562,19 @@ static void qib_user_sdma_free_pkt_frag(struct device *dev,
+ 				       pkt->addr[i].dma_length,
+ 				       DMA_TO_DEVICE);
+ 
+-		if (pkt->addr[i].kvaddr)
+-			kunmap(pkt->addr[i].page);
++#ifdef QIB_CONFIG_KNX
++		if (!pkt->remote) {
++#endif
++			if (pkt->addr[i].kvaddr)
++				kunmap(pkt->addr[i].page);
+ 
+-		if (pkt->addr[i].put_page)
+-			put_page(pkt->addr[i].page);
+-		else
+-			__free_page(pkt->addr[i].page);
++			if (pkt->addr[i].put_page)
++				put_page(pkt->addr[i].page);
++			else
++				__free_page(pkt->addr[i].page);
++#ifdef QIB_CONFIG_KNX
++		}
++#endif
+ 	} else if (pkt->addr[i].kvaddr) {
+ 		/* for headers */
+ 		if (pkt->addr[i].dma_mapped) {
+@@ -775,9 +713,9 @@ static int qib_user_sdma_init_payload(const struct qib_devdata *dd,
+ }
+ 
+ /* free a packet list -- return counter value of last packet */
+-static void qib_user_sdma_free_pkt_list(struct device *dev,
+-					struct qib_user_sdma_queue *pq,
+-					struct list_head *list)
++void qib_user_sdma_free_pkt_list(struct device *dev,
++				 struct qib_user_sdma_queue *pq,
++				 struct list_head *list)
+ {
+ 	struct qib_user_sdma_pkt *pkt, *pkt_next;
+ 
+@@ -787,6 +725,10 @@ static void qib_user_sdma_free_pkt_list(struct device *dev,
+ 		for (i = 0; i < pkt->naddr; i++)
+ 			qib_user_sdma_free_pkt_frag(dev, pq, pkt, i);
+ 
++#ifdef QIB_CONFIG_KNX
++		if (pkt->remote)
++			qib_knx_sdma_free_pkt(pkt);
++#endif
+ 		if (pkt->largepkt)
+ 			kfree(pkt);
+ 		else
+@@ -970,6 +912,9 @@ static int qib_user_sdma_queue_pkts(const struct qib_devdata *dd,
+ 		pkt->payload_size = 0;
+ 		pkt->counter = counter;
+ 		pkt->tiddma = tiddma;
++#ifdef QIB_CONFIG_KNX
++		pkt->remote = 0;
++#endif
+ 
+ 		/* setup the first header */
+ 		qib_user_sdma_init_frag(pkt, 0, /* index */
+@@ -1045,8 +990,8 @@ static void qib_user_sdma_set_complete_counter(struct qib_user_sdma_queue *pq,
+ }
+ 
+ /* try to clean out queue -- needs pq->lock */
+-static int qib_user_sdma_queue_clean(struct qib_pportdata *ppd,
+-				     struct qib_user_sdma_queue *pq)
++int qib_user_sdma_queue_clean(struct qib_pportdata *ppd,
++			      struct qib_user_sdma_queue *pq)
+ {
+ 	struct qib_devdata *dd = ppd->dd;
+ 	struct list_head free_list;
+@@ -1110,7 +1055,7 @@ void qib_user_sdma_queue_destroy(struct qib_user_sdma_queue *pq)
+ }
+ 
+ /* clean descriptor queue, returns > 0 if some elements cleaned */
+-static int qib_user_sdma_hwqueue_clean(struct qib_pportdata *ppd)
++int qib_user_sdma_hwqueue_clean(struct qib_pportdata *ppd)
+ {
+ 	int ret;
+ 	unsigned long flags;
+@@ -1321,9 +1266,9 @@ retry:
+ }
+ 
+ /* pq->lock must be held, get packets on the wire... */
+-static int qib_user_sdma_push_pkts(struct qib_pportdata *ppd,
+-				 struct qib_user_sdma_queue *pq,
+-				 struct list_head *pktlist, int count)
++int qib_user_sdma_push_pkts(struct qib_pportdata *ppd,
++			    struct qib_user_sdma_queue *pq,
++			    struct list_head *pktlist, int count)
+ {
+ 	unsigned long flags;
+ 
+diff --git a/drivers/infiniband/hw/qib/qib_user_sdma.h b/drivers/infiniband/hw/qib/qib_user_sdma.h
+index ce8cbaf..07d5bc5 100644
+--- a/drivers/infiniband/hw/qib/qib_user_sdma.h
++++ b/drivers/infiniband/hw/qib/qib_user_sdma.h
+@@ -31,12 +31,108 @@
+  */
+ #include <linux/device.h>
+ 
+-struct qib_user_sdma_queue;
++struct qib_user_sdma_pkt {
++	struct list_head list;  /* list element */
++
++	u8  tiddma;		/* if this is NEW tid-sdma */
++	u8  largepkt;		/* this is large pkt from kmalloc */
++	u16 frag_size;		/* frag size used by PSM */
++	u16 index;              /* last header index or push index */
++	u16 naddr;              /* dimension of addr (1..3) ... */
++	u16 addrlimit;		/* addr array size */
++	u16 tidsmidx;		/* current tidsm index */
++	u16 tidsmcount;		/* tidsm array item count */
++	u16 payload_size;	/* payload size so far for header */
++	u32 bytes_togo;		/* bytes for processing */
++	u32 counter;            /* sdma pkts queued counter for this entry */
++	struct qib_tid_session_member *tidsm;	/* tid session member array */
++	struct qib_user_sdma_queue *pq;	/* which pq this pkt belongs to */
++	u64 added;              /* global descq number of entries */
++#ifdef QIB_CONFIG_KNX
++	u64 remote;             /* does the packet originate on the host */
++#endif
++
++	struct {
++		u16 offset;                     /* offset for kvaddr, addr */
++		u16 length;                     /* length in page */
++		u16 first_desc;			/* first desc */
++		u16 last_desc;			/* last desc */
++		u16 put_page;                   /* should we put_page? */
++		u16 dma_mapped;                 /* is page dma_mapped? */
++		u16 dma_length;			/* for dma_unmap_page() */
++		u16 padding;
++		struct page *page;              /* may be NULL (coherent mem) */
++		void *kvaddr;                   /* FIXME: only for pio hack */
++		dma_addr_t addr;
++	} addr[4];   /* max pages, any more and we coalesce */
++};
++
++struct qib_user_sdma_queue {
++	/*
++	 * pkts sent to dma engine are queued on this
++	 * list head.  the type of the elements of this
++	 * list are struct qib_user_sdma_pkt...
++	 */
++	struct list_head sent;
++
++	/*
++	 * Because above list will be accessed by both process and
++	 * signal handler, we need a spinlock for it.
++	 */
++	spinlock_t sent_lock ____cacheline_aligned_in_smp;
++
++	/* headers with expected length are allocated from here... */
++	char header_cache_name[64];
++	struct dma_pool *header_cache;
++
++	/* packets are allocated from the slab cache... */
++	char pkt_slab_name[64];
++	struct kmem_cache *pkt_slab;
++
++	/* as packets go on the queued queue, they are counted... */
++	u32 counter;
++	u32 sent_counter;
++	/* pending packets, not sending yet */
++	u32 num_pending;
++	/* sending packets, not complete yet */
++	u32 num_sending;
++	/* global descq number of entry of last sending packet */
++	u64 added;
++
++	/* dma page table */
++	struct rb_root dma_pages_root;
++
++	struct qib_user_sdma_rb_node *sdma_rb_node;
++
++	/* protect everything above... */
++	struct mutex lock;
++};
+ 
+ struct qib_user_sdma_queue *
+ qib_user_sdma_queue_create(struct device *dev, int unit, int port, int sport);
+ void qib_user_sdma_queue_destroy(struct qib_user_sdma_queue *pq);
+-
++void *qib_user_sdma_alloc_header(struct qib_user_sdma_queue *pq,
++				 size_t len, dma_addr_t *dma_addr);
++void qib_user_sdma_init_frag(struct qib_user_sdma_pkt *pkt,
++			     int i, u16 offset, u16 len,
++			     u16 first_desc, u16 last_desc,
++			     u16 put_page, u16 dma_mapped,
++			     struct page *page, void *kvaddr,
++			     dma_addr_t dma_addr, u16 dma_length);
++int qib_user_sdma_page_to_frags(const struct qib_devdata *dd,
++				struct qib_user_sdma_queue *pq,
++				struct qib_user_sdma_pkt *pkt,
++				struct page *page, u16 put,
++				u16 offset, u16 len, void *kvaddr);
++int qib_user_sdma_hwqueue_clean(struct qib_pportdata *ppd);
++int qib_user_sdma_queue_clean(struct qib_pportdata *ppd,
++			      struct qib_user_sdma_queue *pq);
++void qib_user_sdma_free_pkt_list(struct device *dev,
++				 struct qib_user_sdma_queue *pq,
++				 struct list_head *list);
++int qib_user_sdma_push_pkts(struct qib_pportdata *ppd,
++			    struct qib_user_sdma_queue *pq,
++			    struct list_head *pktlist, int count);
+ int qib_user_sdma_writev(struct qib_ctxtdata *pd,
+ 			 struct qib_user_sdma_queue *pq,
+ 			 const struct iovec *iov,
+@@ -50,3 +146,9 @@ void qib_user_sdma_queue_drain(struct qib_pportdata *ppd,
+ 
+ u32 qib_user_sdma_complete_counter(const struct qib_user_sdma_queue *pq);
+ u32 qib_user_sdma_inflight_counter(struct qib_user_sdma_queue *pq);
++
++/*
++ * This function prototype somewhat polutes this header file
++ * but I don't want to create a new header file just for it.
++ */
++void qib_knx_sdma_free_pkt(struct qib_user_sdma_pkt *pkt);
