@@ -303,29 +303,6 @@ rm -rf $RPM_BUILD_DIR/%{_name}-%{_version}
 
 %post
 if [ $1 -ge 1 ]; then # 1 : This package is being installed or reinstalled
-count_ib_ports()
-{
-    local cnt=0
-    local tmp_cnt=0
-    
-    tmp_cnt=$(/sbin/lspci -n | grep "15b3:" | wc -l | tr -d '[:space:]') # Mellanox HCAs
-    cnt=$[ $cnt + 2*${tmp_cnt} ]
-    
-    tmp_cnt=$(/sbin/lspci -n | grep -E "1fc1:|1077:7220" | wc -l | tr -d '[:space:]') # QLogic SDR and DDR HCA
-    cnt=$[ $cnt + ${tmp_cnt} ]
-    
-    tmp_cnt=$(/sbin/lspci -n | grep -E "1077:7322" | wc -l | tr -d '[:space:]') # QLogic QDR HCA
-    cnt=$[ $cnt + 2*${tmp_cnt} ]
-    return $cnt
-}
-
-count_ib_ports
-ports_num=$?
-
-# Set default number of ports to 2 if no HCAs found
-if [ $ports_num -eq 0 ]; then
-    ports_num=2
-fi    
 #############################################################################################################
 #                                       Modules configuration                                               #
 #############################################################################################################
@@ -345,17 +322,6 @@ KERNEL="rdma_cm", NAME="infiniband/%k", MODE="0666"
 # End Infiniband devices #
 EOF
     fi
-%endif
-
-%if %{modprobe_update}
-%if %{build_ipoib}
-for (( i=0 ; i < $ports_num ; i++ ))
-do
-cat >> /etc/modprobe.d/ib_ipoib.conf << EOF
-alias ib${i} ib_ipoib
-EOF
-done
-%endif
 %endif
 
     /sbin/depmod %{KVERSION}
