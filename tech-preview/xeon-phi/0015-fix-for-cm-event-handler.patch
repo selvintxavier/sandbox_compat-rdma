@@ -1,0 +1,158 @@
+diff --git a/drivers/infiniband/ibp/cm/cm_server_msg.c b/drivers/infiniband/ibp/cm/cm_server_msg.c
+index df9cde2..c7f8991 100644
+--- a/drivers/infiniband/ibp/cm/cm_server_msg.c
++++ b/drivers/infiniband/ibp/cm/cm_server_msg.c
+@@ -90,19 +90,6 @@ void ib_copy_sa_path_rec(struct ibp_sa_path_rec *a, struct ib_sa_path_rec *b)
+ 	a->preference			= b->preference;
+ }
+ 
+-void cleanup_cm_entry_list(void)
+-{
+-	struct cm_entry				*entry;
+-	struct cm_entry				*next;
+-
+-	down_write(&list_rwsem);
+-
+-	list_for_each_entry_safe(entry, next, &cm_entry_list, list)
+-		kfree(entry);
+-
+-	up_write(&list_rwsem);
+-}
+-
+ static struct cm_entry *find_cm_entry(struct ib_cm_id *cm_id)
+ {
+ 	struct cm_entry				*entry;
+@@ -122,6 +109,29 @@ out:
+ 	return entry;
+ }
+ 
++static struct cm_entry *remove_cm_entry(struct ib_cm_id *cm_id)
++{
++	struct cm_entry				*entry, *found = NULL;
++
++	down_write(&list_rwsem);
++
++	list_for_each_entry(entry, &cm_entry_list, list)
++		if (entry->cm_id == cm_id) {
++			found = entry;
++			break;
++		}
++
++	if (!found) {
++		print_err("Remove could not find cm id %p\n", cm_id);
++	} else {
++		list_del(&found->list);
++	}
++
++	up_write(&list_rwsem);
++
++	return found;
++}
++
+ /* find the entry id for the listen cm id so we can add the new cm id
+  * that is being accepted to the list so it can be found on future events
+  */
+@@ -129,27 +139,35 @@ static struct cm_entry *find_cm_entry_and_add(struct ib_cm_id *listen_id,
+ 					      struct ib_cm_id *cm_id)
+ {
+ 	struct cm_entry				*entry;
+-	struct cm_entry				*listen_entry;
++	struct cm_entry				*listen_entry = NULL;
++
++	down_write(&list_rwsem);
++
++	list_for_each_entry(entry, &cm_entry_list, list)
++		if (entry->cm_id == listen_id) {
++			listen_entry = entry;
++			break;
++		}
+ 
+-	listen_entry = find_cm_entry(listen_id);
+ 	if (!listen_entry) {
+ 		print_err("Could not find listen id %p\n", listen_id);
+-		return NULL;
++		goto out;
+ 	}
+ 
+ 	entry = kzalloc(sizeof(struct cm_entry), GFP_KERNEL);
+ 	if (!entry) {
+ 		print_err("kzalloc failed\n");
+-		return NULL;
++		listen_entry = NULL;
++		goto out;
+ 	}
+ 
+ 	entry->client = listen_entry->client;
+ 	entry->cm_id = cm_id;
+ 
+-	down_write(&list_rwsem);
+ 	list_add(&entry->list, &cm_entry_list);
+-	up_write(&list_rwsem);
+ 
++out:
++	up_write(&list_rwsem);
+ 	return listen_entry;
+ }
+ 
+@@ -292,7 +310,7 @@ static int ibp_event_handler(struct ib_cm_id *cm_id,
+ 			     data_length + info_length, GFP_KERNEL);
+ 	if (!event_work) {
+ 		print_err("kzalloc failed\n");
+-		return -ENOMEM;
++		return 0;
+ 	}
+ 
+ 	if (ib_cm_event->event == IB_CM_REQ_RECEIVED) {
+@@ -307,8 +325,9 @@ static int ibp_event_handler(struct ib_cm_id *cm_id,
+ 		entry = find_cm_entry(cm_id);
+ 
+ 	if (!entry) {
++		print_err("event (%d) on non-existent id: %p\n", ib_cm_event->event, cm_id);
+ 		kfree(event_work);
+-		return -EINVAL;
++		return 0;
+ 	}
+ 
+ 	client = entry->client;
+@@ -406,7 +425,7 @@ static int ibp_event_handler(struct ib_cm_id *cm_id,
+ 			ib_cm_event->param.send_status;
+ 		break;
+ 	default:
+-		print_dbg("event not handled %d\n", ib_cm_event->event);
++		print_err("event not handled %d\n", ib_cm_event->event);
+ 		break;
+ 	}
+ 
+@@ -509,16 +528,13 @@ int ibp_cmd_destroy_cm_id(struct ibp_client *client, struct ibp_msg_header *hdr)
+ 	msg	= (struct ibp_response_msg *) client->tx_buf;
+ 	len	= sizeof(*msg);
+ 
+-	entry = find_cm_entry(cm_id);
+-	if (!entry)
++	entry = remove_cm_entry(cm_id);
++	if (!entry) {
++		ret = -EINVAL;
+ 		goto send_resp;
+-
+-	down_write(&list_rwsem);
+-	list_del(&entry->list);
+-	up_write(&list_rwsem);
++	}
+ 
+ 	kfree(entry);
+-
+ 	ib_destroy_cm_id(cm_id);
+ 
+ send_resp:
+diff --git a/drivers/infiniband/ibp/cm/server.h b/drivers/infiniband/ibp/cm/server.h
+index a66141b..ebe8461 100644
+--- a/drivers/infiniband/ibp/cm/server.h
++++ b/drivers/infiniband/ibp/cm/server.h
+@@ -101,7 +101,6 @@ struct ibp_event {
+ 	} while (0)
+ 
+ int ibp_process_recvs(void *p);
+-void cleanup_cm_entry_list(void);
+ 
+ int ibp_cmd_create_cm_id(struct ibp_client *client, struct ibp_msg_header *hdr);
+ int ibp_cmd_destroy_cm_id(struct ibp_client *client,
