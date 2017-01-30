@@ -1,0 +1,272 @@
+diff --git a/drivers/infiniband/hw/qib/qib_knx.c b/drivers/infiniband/hw/qib/qib_knx.c
+index 30f12af..77f31ac 100644
+--- a/drivers/infiniband/hw/qib/qib_knx.c
++++ b/drivers/infiniband/hw/qib/qib_knx.c
+@@ -45,7 +45,7 @@ unsigned int qib_knx_nconns = 5;
+ module_param_named(num_conns, qib_knx_nconns, uint, S_IRUGO);
+ MODULE_PARM_DESC(num_conns, "Max number of pending connections");
+ 
+-#define QIB_KNX_SCIF_PORT SCIF_OFED_PORT_9
++#define QIB_KNX_SCIF_PORT 69
+ #define CLIENT_THREAD_NAME(x) "qib/mic" __stringify(x)
+ 
+ #define knx_sdma_next(sdma) \
+@@ -54,6 +54,101 @@ MODULE_PARM_DESC(num_conns, "Max number of pending connections");
+ #define QIB_KNX_SDMA_STATUS(sdma, st) \
+ 	QIB_KNX_SDMA_SET(sdma->mflags->status, ((u64)st << 32) | 1)
+ 
++#ifdef HAVE_UPSTREAM_SCIF
++
++#include <linux/pci_ids.h>
++#include <linux/pci.h>
++
++#define scif_portID scif_port_id
++
++#define MIC_X100_PCI_DEVICE_2250 0x2250
++#define MIC_X100_PCI_DEVICE_2251 0x2251
++#define MIC_X100_PCI_DEVICE_2252 0x2252
++#define MIC_X100_PCI_DEVICE_2253 0x2253
++#define MIC_X100_PCI_DEVICE_2254 0x2254
++#define MIC_X100_PCI_DEVICE_2255 0x2255
++#define MIC_X100_PCI_DEVICE_2256 0x2256
++#define MIC_X100_PCI_DEVICE_2257 0x2257
++#define MIC_X100_PCI_DEVICE_2258 0x2258
++#define MIC_X100_PCI_DEVICE_2259 0x2259
++#define MIC_X100_PCI_DEVICE_225a 0x225a
++#define MIC_X100_PCI_DEVICE_225b 0x225b
++#define MIC_X100_PCI_DEVICE_225c 0x225c
++#define MIC_X100_PCI_DEVICE_225d 0x225d
++#define MIC_X100_PCI_DEVICE_225e 0x225e
++#define PLX_PCI_DEVICE_87A0 0x87A0
++#define PLX_PCI_DEVICE_87B0 0x87B0
++#define INTEL_PCI_DEVICE_2260 0x2260
++#define INTEL_PCI_DEVICE_2265 0x2265
++
++static const struct pci_device_id xeon_phi_tbl[] = {
++	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_2250)},
++	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_2251)},
++	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_2252)},
++	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_2253)},
++	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_2254)},
++	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_2255)},
++	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_2256)},
++	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_2257)},
++	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_2258)},
++	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_2259)},
++	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_225a)},
++	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_225b)},
++	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_225c)},
++	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_225d)},
++	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_225e)},
++	{PCI_DEVICE(PCI_VENDOR_ID_PLX, PLX_PCI_DEVICE_87A0)},
++	{PCI_DEVICE(PCI_VENDOR_ID_PLX, PLX_PCI_DEVICE_87B0)},
++	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, INTEL_PCI_DEVICE_2260)},
++	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, INTEL_PCI_DEVICE_2265)},
++	{}
++};
++
++/*
++ * Emulate the scif_pci_info call which is not included in the upstream scif.
++ */
++struct scif_pci_info {
++	/* pci_dev pointer associated with a node */
++	struct pci_dev *pdev;
++	/* Ioremapped virtual address base for every valid PCIe resource */
++	void __iomem *va[PCI_NUM_RESOURCES];
++};
++
++int scif_pci_info(uint16_t node, struct scif_pci_info *dev)
++{
++	const struct pci_device_id *id;
++	struct pci_dev *pdev = NULL;
++
++	/* node 0 is the host. */
++	if (node < 1)
++		return -ENODEV;
++
++	/* This assumes pci_get_device searches in the correct order. */
++	while (node &&
++	       !!(pdev = pci_get_device(PCI_ANY_ID, PCI_ANY_ID, pdev))) {
++		for (id = xeon_phi_tbl; id->vendor; id++) {
++			if (pdev->vendor == id->vendor &&
++			    pdev->device == id->device) {
++				--node;
++				break;
++			}
++		}
++	}
++
++	if (node && !pdev)
++		return -EINVAL;
++
++	/* The dev->va array is not used by ib_qib. */
++	memset(dev, 0, sizeof(*dev));
++	dev->pdev = pdev;
++
++	pci_dev_put(pdev);
++
++	return 0;
++}
++
++#endif /* HAVE_UPSTREAM_SCIF */
++
+ struct qib_knx_server {
+ 	struct task_struct *kthread;
+ 	struct scif_pollepd epd;
+@@ -203,92 +298,6 @@ inline struct qib_devdata *qib_knx_node_to_dd(u16 node)
+ 	return knx ? knx->dd : NULL;
+ }
+ 
+-#ifdef HAVE_UPSTREAM_SCIF
+-
+-#include <linux/pci_ids.h>
+-#include <linux/pci.h>
+-
+-#define MIC_X100_PCI_DEVICE_2250 0x2250
+-#define MIC_X100_PCI_DEVICE_2251 0x2251
+-#define MIC_X100_PCI_DEVICE_2252 0x2252
+-#define MIC_X100_PCI_DEVICE_2253 0x2253
+-#define MIC_X100_PCI_DEVICE_2254 0x2254
+-#define MIC_X100_PCI_DEVICE_2255 0x2255
+-#define MIC_X100_PCI_DEVICE_2256 0x2256
+-#define MIC_X100_PCI_DEVICE_2257 0x2257
+-#define MIC_X100_PCI_DEVICE_2258 0x2258
+-#define MIC_X100_PCI_DEVICE_2259 0x2259
+-#define MIC_X100_PCI_DEVICE_225a 0x225a
+-#define MIC_X100_PCI_DEVICE_225b 0x225b
+-#define MIC_X100_PCI_DEVICE_225c 0x225c
+-#define MIC_X100_PCI_DEVICE_225d 0x225d
+-#define MIC_X100_PCI_DEVICE_225e 0x225e
+-#define PLX_PCI_DEVICE_87A0 0x87A0
+-#define PLX_PCI_DEVICE_87B0 0x87B0
+-#define INTEL_PCI_DEVICE_2260 0x2260
+-#define INTEL_PCI_DEVICE_2265 0x2265
+-
+-static const struct pci_device_id xeon_phi_tbl[] = {
+-	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_2250)},
+-	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_2251)},
+-	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_2252)},
+-	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_2253)},
+-	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_2254)},
+-	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_2255)},
+-	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_2256)},
+-	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_2257)},
+-	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_2258)},
+-	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_2259)},
+-	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_225a)},
+-	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_225b)},
+-	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_225c)},
+-	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_225d)},
+-	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MIC_X100_PCI_DEVICE_225e)},
+-	{PCI_DEVICE(PCI_VENDOR_ID_PLX, PLX_PCI_DEVICE_87A0)},
+-	{PCI_DEVICE(PCI_VENDOR_ID_PLX, PLX_PCI_DEVICE_87B0)},
+-	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, INTEL_PCI_DEVICE_2260)},
+-	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, INTEL_PCI_DEVICE_2265)},
+-	{}
+-};
+-
+-/*
+- * Emulate the scif_pci_info call which is not included in the upstream scif.
+- */
+-int scif_pci_info(uint16_t node, struct scif_pci_info *dev)
+-{
+-	const struct pci_device_id *id;
+-	struct pci_dev *pdev = NULL;
+-
+-	/* node 0 is the host. */
+-	if (node < 1)
+-		return -ENODEV;
+-
+-	/* This assumes pci_get_device searches in the correct order. */
+-	while (node &&
+-	       !!(pdev = pci_get_device(PCI_ANY_ID, PCI_ANY_ID, pdev))) {
+-		for (id = xeon_phi_tbl; id->vendor; id++) {
+-			if (pdev->vendor == id->vendor &&
+-			    pdev->device == id->device) {
+-				--node;
+-				break;
+-			}
+-		}
+-	}
+-
+-	if (node && !pdev)
+-		return -EINVAL;
+-
+-	/* The dev->va array is not used by ib_qib. */
+-	memset(dev, 0, sizeof(*dev));
+-	dev->pdev = pdev;
+-
+-	pci_dev_put(pdev);
+-
+-	return 0;
+-}
+-
+-#endif /* HAVE_UPSTREAM_SCIF */
+-
+ static int qib_knx_init(struct qib_knx_server *server)
+ {
+ 	int ret = 0, num_devs = 0, i, seen = 0;
+diff --git a/drivers/infiniband/hw/scif/ibscif_driver.h b/drivers/infiniband/hw/scif/ibscif_driver.h
+index 45acd16..5308ad5 100644
+--- a/drivers/infiniband/hw/scif/ibscif_driver.h
++++ b/drivers/infiniband/hw/scif/ibscif_driver.h
+@@ -75,8 +75,9 @@
+ #include "ibscif_protocol.h"
+ 
+ #ifdef HAVE_UPSTREAM_SCIF
+-int scif_get_node_ids(u16 *nodes, int len, u16 *self);
+ #define scif_get_nodeIDs	scif_get_node_ids
++#define scif_portID		scif_port_id
++#define SCIF_OFED_PORT_0	60
+ #endif
+ 
+ #define IBSCIF_MTU	4096
+diff --git a/drivers/infiniband/ibp/cm/common.h b/drivers/infiniband/ibp/cm/common.h
+index 8c3358a..1834e79 100644
+--- a/drivers/infiniband/ibp/cm/common.h
++++ b/drivers/infiniband/ibp/cm/common.h
+@@ -96,6 +96,11 @@ enum {
+ #define print_trace(f, arg...) PRINTK(IBP_DEBUG_VERBOSE, KERN_ERR, f, ##arg)
+ #endif
+ 
++#ifdef HAVE_UPSTREAM_SCIF
++#define SCIF_OFED_PORT_3   63
++#define scif_portID scif_port_id
++#endif
++
+ #ifndef IBP_CM_PORT		/* unique scif port for this service */
+ #define IBP_CM_PORT		SCIF_OFED_PORT_3
+ #endif
+diff --git a/drivers/infiniband/ibp/drv/common.h b/drivers/infiniband/ibp/drv/common.h
+index 194840f..83ac976 100644
+--- a/drivers/infiniband/ibp/drv/common.h
++++ b/drivers/infiniband/ibp/drv/common.h
+@@ -96,6 +96,12 @@ enum {
+ #define print_trace(f, arg...) PRINTK(IBP_DEBUG_VERBOSE, KERN_ERR, f, ##arg)
+ #endif
+ 
++#ifdef HAVE_UPSTREAM_SCIF
++#define SCIF_OFED_PORT_2   62
++#define scif_portID scif_port_id
++#endif
++
++
+ #ifndef IBP_PORT		/* unique scif port for this service */
+ #define IBP_PORT		SCIF_OFED_PORT_2
+ #endif
+diff --git a/drivers/infiniband/ibp/sa/common.h b/drivers/infiniband/ibp/sa/common.h
+index e6a802f..026d8dc 100644
+--- a/drivers/infiniband/ibp/sa/common.h
++++ b/drivers/infiniband/ibp/sa/common.h
+@@ -96,6 +96,11 @@ enum {
+ #define print_trace(f, arg...) PRINTK(IBP_DEBUG_VERBOSE, KERN_ERR, f, ##arg)
+ #endif
+ 
++#ifdef HAVE_UPSTREAM_SCIF
++#define SCIF_OFED_PORT_4   64
++#define scif_portID scif_port_id
++#endif
++
+ #ifndef IBP_SA_PORT		/* unique scif port for this service */
+ #define IBP_SA_PORT		SCIF_OFED_PORT_4
+ #endif
