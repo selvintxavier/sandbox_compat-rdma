@@ -965,7 +965,7 @@ diff -ruN a/drivers/infiniband/hw/scif/ibscif_driver.h b/drivers/infiniband/hw/s
 +#include <rdma/ib_user_verbs.h>
 +#include <rdma/iw_cm.h>
 +
-+#include <modules/scif.h>
++#include <scif.h>
 +#include "ibscif_protocol.h"
 +
 +#define IBSCIF_MTU	4096

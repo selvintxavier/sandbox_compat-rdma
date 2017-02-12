@@ -98,7 +98,7 @@ diff -Nrup a/drivers/infiniband/hw/scif/ibscif_driver.h b/drivers/infiniband/hw/
 --- a/drivers/infiniband/hw/scif/ibscif_driver.h	2015-10-08 07:44:08.727979908 -0700
 +++ b/drivers/infiniband/hw/scif/ibscif_driver.h	2015-10-08 07:44:52.759981899 -0700
 @@ -74,6 +74,11 @@
- #include <modules/scif.h>
+ #include <scif.h>
  #include "ibscif_protocol.h"
  
 +#ifdef HAVE_UPSTREAM_SCIF

@@ -690,7 +690,7 @@ diff -ruN a9/drivers/infiniband/hw/qib/qib_knx.c a10/drivers/infiniband/hw/qib/q
 +#include <linux/kernel.h>
 +#include <linux/dma-mapping.h>
 +#include <linux/scatterlist.h>
-+#include <modules/scif.h>
++#include <scif.h>
 +
 +#include "qib.h"
 +#include "qib_knx.h"
