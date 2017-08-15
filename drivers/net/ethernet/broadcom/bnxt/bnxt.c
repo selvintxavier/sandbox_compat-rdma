@@ -7176,8 +7176,8 @@ static int bnxt_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	dev->priv_flags |= IFF_UNICAST_FLT;
 
 	/* MTU range: 60 - 9500 */
-	dev->min_mtu = ETH_ZLEN;
-	dev->max_mtu = 9500;
+	//dev->min_mtu = ETH_ZLEN;
+	//dev->max_mtu = 9500;
 
 	bnxt_dcb_init(bp);
 
